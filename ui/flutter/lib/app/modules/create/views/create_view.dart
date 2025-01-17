@@ -1,44 +1,164 @@
-import 'package:autoscale_tabbarview/autoscale_tabbarview.dart';
+import 'dart:convert';
+
+import 'package:contentsize_tabbarview/contentsize_tabbarview.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
-import '../../../../api/model/resolve_result.dart';
-import 'package:rounded_loading_button/rounded_loading_button.dart';
+import 'package:path/path.dart' as path;
+import 'package:rounded_loading_button_plus/rounded_loading_button.dart';
 
 import '../../../../api/api.dart';
 import '../../../../api/model/create_task.dart';
 import '../../../../api/model/options.dart';
 import '../../../../api/model/request.dart';
+import '../../../../api/model/resolve_result.dart';
+import '../../../../api/model/task.dart';
+import '../../../../database/database.dart';
 import '../../../../util/input_formatter.dart';
 import '../../../../util/message.dart';
 import '../../../../util/util.dart';
 import '../../../routes/app_pages.dart';
+import '../../../views/compact_checkbox.dart';
 import '../../../views/directory_selector.dart';
-import '../../../views/file_list_view.dart';
+import '../../../views/file_tree_view.dart';
 import '../../app/controllers/app_controller.dart';
+import '../../history/views/history_view.dart';
 import '../controllers/create_controller.dart';
+import '../dto/create_router_params.dart';
 
 class CreateView extends GetView<CreateController> {
-  final _resolveFormKey = GlobalKey<FormState>();
+  final _confirmFormKey = GlobalKey<FormState>();
 
   final _urlController = TextEditingController();
+  final _renameController = TextEditingController();
+  final _connectionsController = TextEditingController();
+  final _pathController = TextEditingController();
   final _confirmController = RoundedLoadingButtonController();
-  final _httpUaController = TextEditingController();
-  final _httpCookieController = TextEditingController();
-  final _httpRefererController = TextEditingController();
+  final _proxyIpController = TextEditingController();
+  final _proxyPortController = TextEditingController();
+  final _proxyUsrController = TextEditingController();
+  final _proxyPwdController = TextEditingController();
+  final _httpHeaderControllers = [
+    (
+      name: TextEditingController(text: "User-Agent"),
+      value: TextEditingController()
+    ),
+    (
+      name: TextEditingController(text: "Cookie"),
+      value: TextEditingController()
+    ),
+    (
+      name: TextEditingController(text: "Referer"),
+      value: TextEditingController()
+    ),
+  ];
   final _btTrackerController = TextEditingController();
+
+  final _availableSchemes = ["http:", "https:", "magnet:"];
+
+  final _skipVerifyCertController = false.obs;
 
   CreateView({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
-    final String? filePath = Get.rootDelegate.arguments();
-    if (_urlController.text.isEmpty && filePath != null) {
-      _urlController.text = filePath;
-      WidgetsBinding.instance.addPostFrameCallback((_) async {
-        await _doResolve();
+    final appController = Get.find<AppController>();
+
+    if (_connectionsController.text.isEmpty) {
+      _connectionsController.text = appController
+          .downloaderConfig.value.protocolConfig.http.connections
+          .toString();
+    }
+    if (_pathController.text.isEmpty) {
+      _pathController.text = appController.downloaderConfig.value.downloadDir;
+    }
+
+    final CreateRouterParams? routerParams = Get.rootDelegate.arguments();
+    if (routerParams?.req?.url.isNotEmpty ?? false) {
+      // get url from route arguments
+      final url = routerParams!.req!.url;
+      _urlController.text = url;
+      _urlController.selection = TextSelection.fromPosition(
+          TextPosition(offset: _urlController.text.length));
+      final uppercaseUrl = url.toUpperCase();
+      Protocol? protocol;
+      if (uppercaseUrl.startsWith("HTTP:") ||
+          uppercaseUrl.startsWith("HTTPS:")) {
+        protocol = Protocol.http;
+      }
+      if (uppercaseUrl.startsWith("MAGNET:") ||
+          uppercaseUrl.endsWith(".TORRENT")) {
+        protocol = Protocol.bt;
+      }
+      if (protocol != null) {
+        final extraHandlers = {
+          Protocol.http: () {
+            final reqExtra = ReqExtraHttp.fromJson(
+                jsonDecode(jsonEncode(routerParams.req!.extra)));
+            _httpHeaderControllers.clear();
+            reqExtra.header.forEach((key, value) {
+              _httpHeaderControllers.add(
+                (
+                  name: TextEditingController(text: key),
+                  value: TextEditingController(text: value),
+                ),
+              );
+            });
+            _skipVerifyCertController.value = routerParams.req!.skipVerifyCert;
+          },
+          Protocol.bt: () {
+            final reqExtra = ReqExtraBt.fromJson(
+                jsonDecode(jsonEncode(routerParams.req!.extra)));
+            _btTrackerController.text = reqExtra.trackers.join("\n");
+          },
+        };
+        if (routerParams.req?.extra != null) {
+          extraHandlers[protocol]?.call();
+        }
+
+        // handle options
+        if (routerParams.opt != null) {
+          _renameController.text = routerParams.opt!.name;
+          _pathController.text = routerParams.opt!.path;
+
+          final optionsHandlers = {
+            Protocol.http: () {
+              final opt = routerParams.opt!;
+              _renameController.text = opt.name;
+              _pathController.text = opt.path;
+              if (opt.extra != null) {
+                final optsExtraHttp =
+                    OptsExtraHttp.fromJson(jsonDecode(jsonEncode(opt.extra)));
+                _connectionsController.text =
+                    optsExtraHttp.connections.toString();
+              }
+            },
+            Protocol.bt: null,
+          };
+          if (routerParams.opt?.extra != null) {
+            optionsHandlers[protocol]?.call();
+          }
+        }
+      }
+    } else if (_urlController.text.isEmpty) {
+      // read clipboard
+      Clipboard.getData('text/plain').then((value) {
+        if (value?.text?.isNotEmpty ?? false) {
+          if (_availableSchemes
+              .where((e) =>
+                  value!.text!.startsWith(e) ||
+                  value.text!.startsWith(e.toUpperCase()))
+              .isNotEmpty) {
+            _urlController.text = value!.text!;
+            _urlController.selection = TextSelection.fromPosition(
+                TextPosition(offset: _urlController.text.length));
+            return;
+          }
+
+          recognizeMagnetUri(value!.text!);
+        }
       });
     }
 
@@ -51,208 +171,642 @@ class CreateView extends GetView<CreateController> {
         title: Text('create'.tr),
       ),
       body: DropTarget(
-        onDragDone: (details) {
-          _urlController.text = details.files[0].path;
+        onDragDone: (details) async {
+          if (!Util.isWeb()) {
+            _urlController.text = details.files[0].path;
+            return;
+          }
+          _urlController.text = details.files[0].name;
+          final bytes = await details.files[0].readAsBytes();
+          controller.setFileDataUri(bytes);
         },
-        child: Padding(
-            padding:
-                const EdgeInsets.symmetric(vertical: 16.0, horizontal: 24.0),
-            child: Form(
-                key: _resolveFormKey,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            FocusScope.of(context).requestFocus(FocusNode());
+          },
+          child: SingleChildScrollView(
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(vertical: 16.0, horizontal: 24.0),
+              child: Form(
+                key: _confirmFormKey,
                 autovalidateMode: AutovalidateMode.onUserInteraction,
-                child: Column(children: [
-                  Row(
-                    children: [
+                child: Column(
+                  children: [
+                    Row(children: [
                       Expanded(
                         child: TextFormField(
-                            autofocus: true,
-                            controller: _urlController,
-                            minLines: 1,
-                            maxLines: 5,
-                            decoration: InputDecoration(
-                              hintText: _hitText(),
-                              hintStyle: const TextStyle(fontSize: 12),
-                              labelText: 'downloadLink'.tr,
-                              icon: const Icon(Icons.link),
-                              suffixIcon: IconButton(
-                                onPressed: _urlController.clear,
-                                icon: const Icon(Icons.clear),
-                              ),
+                          autofocus: !Util.isMobile(),
+                          controller: _urlController,
+                          minLines: 1,
+                          maxLines: 5,
+                          decoration: InputDecoration(
+                            hintText: _hitText(),
+                            hintStyle: const TextStyle(fontSize: 12),
+                            labelText: 'downloadLink'.tr,
+                            icon: const Icon(Icons.link),
+                            suffixIcon: IconButton(
+                              onPressed: () {
+                                _urlController.clear();
+                                controller.clearFileDataUri();
+                              },
+                              icon: const Icon(Icons.clear),
                             ),
-                            validator: (v) {
-                              return v!.trim().isNotEmpty
-                                  ? null
-                                  : 'downloadLinkValid'.tr;
-                            }),
+                          ),
+                          validator: (v) {
+                            return v!.trim().isNotEmpty
+                                ? null
+                                : 'downloadLinkValid'.tr;
+                          },
+                          onChanged: (v) async {
+                            controller.clearFileDataUri();
+                            if (controller.oldUrl.value.isEmpty) {
+                              recognizeMagnetUri(v);
+                            }
+                            controller.oldUrl.value = v;
+                          },
+                        ),
                       ),
-                      Util.isWeb()
-                          ? null
-                          : IconButton(
-                              icon: const Icon(Icons.folder_open),
-                              onPressed: () async {
-                                var pr = await FilePicker.platform.pickFiles(
-                                    type: FileType.custom,
-                                    allowedExtensions: ["torrent"]);
-                                if (pr != null) {
-                                  _urlController.text = pr.files[0].path ?? "";
-                                }
-                              }),
-                    ].where((e) => e != null).map((e) => e!).toList(),
-                  ),
-                  Obx(() => Visibility(
-                      visible: controller.showAdvanced.value,
-                      child: Padding(
-                        padding: const EdgeInsets.only(left: 40, top: 15),
-                        child: Column(
-                          children: [
-                            TabBar(
-                              controller: controller.advancedTabController,
-                              tabs: const [
-                                Tab(
-                                  text: 'HTTP',
-                                ),
-                                Tab(
-                                  text: 'BitTorrent',
-                                )
-                              ],
-                            ),
-                            AutoScaleTabBarView(
-                              controller: controller.advancedTabController,
-                              children: [
-                                Column(
-                                  children: [
-                                    TextFormField(
-                                        controller: _httpUaController,
-                                        decoration: const InputDecoration(
-                                          labelText: 'User-Agent',
-                                        )),
-                                    TextFormField(
-                                        controller: _httpCookieController,
-                                        decoration: const InputDecoration(
-                                          labelText: 'Cookie',
-                                        )),
-                                    TextFormField(
-                                        controller: _httpRefererController,
-                                        decoration: const InputDecoration(
-                                          labelText: 'Referer',
-                                        )),
-                                  ],
-                                ),
-                                Column(
-                                  children: [
-                                    TextFormField(
-                                        controller: _btTrackerController,
-                                        maxLines: 5,
-                                        decoration: InputDecoration(
-                                          labelText: 'Trakers',
-                                          hintText: 'addTrackerHit'.tr,
-                                        )),
-                                  ],
-                                )
-                              ],
-                            )
+                      IconButton(
+                        icon: const Icon(Icons.folder_open),
+                        onPressed: () async {
+                          var pr = await FilePicker.platform.pickFiles(
+                              type: FileType.custom,
+                              allowedExtensions: ["torrent"]);
+                          if (pr != null) {
+                            if (!Util.isWeb()) {
+                              _urlController.text = pr.files[0].path ?? "";
+                              return;
+                            }
+                            _urlController.text = pr.files[0].name;
+                            controller.setFileDataUri(pr.files[0].bytes!);
+                          }
+                        },
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.history_rounded),
+                        onPressed: () async {
+                          List<String> resultOfHistories =
+                              Database.instance.getCreateHistory() ?? [];
+                          // show dialog box to list history
+                          if (context.mounted) {
+                            showGeneralDialog(
+                              barrierColor: Colors.black.withOpacity(0.5),
+                              transitionBuilder: (context, a1, a2, widget) {
+                                return Transform.scale(
+                                  scale: a1.value,
+                                  child: Opacity(
+                                    opacity: a1.value,
+                                    child: HistoryView(
+                                      isHistoryListEmpty:
+                                          resultOfHistories.isEmpty,
+                                      historyList: ListView.builder(
+                                        itemCount: resultOfHistories.length,
+                                        itemBuilder: (context, index) {
+                                          return GestureDetector(
+                                            onTap: () {
+                                              _urlController.text =
+                                                  resultOfHistories[index];
+                                              Navigator.pop(context);
+                                            },
+                                            child: MouseRegion(
+                                              cursor: SystemMouseCursors.click,
+                                              child: Container(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                  horizontal: 8.0,
+                                                  vertical: 8.0,
+                                                ),
+                                                margin:
+                                                    const EdgeInsets.symmetric(
+                                                  horizontal: 10.0,
+                                                  vertical: 8.0,
+                                                ),
+                                                decoration: BoxDecoration(
+                                                  color: Theme.of(context)
+                                                      .colorScheme
+                                                      .surface,
+                                                  borderRadius:
+                                                      BorderRadius.circular(
+                                                          10.0),
+                                                ),
+                                                child: Text(
+                                                  resultOfHistories[index],
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                              transitionDuration:
+                                  const Duration(milliseconds: 250),
+                              barrierDismissible: true,
+                              barrierLabel: '',
+                              context: context,
+                              pageBuilder: (context, animation1, animation2) {
+                                return const Text('PAGE BUILDER');
+                              },
+                            );
+                          }
+                        },
+                      ),
+                    ]),
+                    Padding(
+                      padding: const EdgeInsets.only(left: 40),
+                      child: Column(children: [
+                        TextField(
+                          controller: _renameController,
+                          decoration: InputDecoration(labelText: 'rename'.tr),
+                        ),
+                        TextField(
+                          controller: _connectionsController,
+                          decoration: InputDecoration(
+                            labelText: 'connections'.tr,
+                          ),
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.digitsOnly,
+                            NumericalRangeFormatter(min: 1, max: 256),
                           ],
                         ),
-                      ))),
-                  Center(
-                      child: Padding(
-                    padding: const EdgeInsets.only(top: 15),
-                    child: Column(
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.only(right: 10),
-                          child: TextButton(
-                            onPressed: () {
-                              controller.showAdvanced.value =
-                                  !controller.showAdvanced.value;
-                            },
-                            child:
-                                Row(mainAxisSize: MainAxisSize.min, children: [
-                              Obx(() => Checkbox(
-                                    value: controller.showAdvanced.value,
-                                    onChanged: (bool? value) {
-                                      controller.showAdvanced.value =
-                                          value ?? false;
-                                    },
-                                  )),
-                              Text('advancedOptions'.tr),
-                            ]),
+                        DirectorySelector(
+                          controller: _pathController,
+                        ),
+                        Obx(
+                          () => Visibility(
+                            visible: controller.showAdvanced.value,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Transform.translate(
+                                      offset: const Offset(-40, 0),
+                                      child: Row(
+                                        children: [
+                                          const Icon(
+                                            Icons.wifi_2_bar,
+                                            color: Colors.grey,
+                                          ),
+                                          const SizedBox(
+                                            width: 15,
+                                          ),
+                                          SizedBox(
+                                              width: 150,
+                                              child: DropdownButton<
+                                                  RequestProxyMode>(
+                                                hint: Text('proxy'.tr),
+                                                isExpanded: true,
+                                                value: controller
+                                                    .proxyConfig.value?.mode,
+                                                onChanged: (value) async {
+                                                  if (value != null) {
+                                                    controller.proxyConfig
+                                                        .value = RequestProxy()
+                                                      ..mode = value;
+                                                  }
+                                                },
+                                                items: [
+                                                  DropdownMenuItem<
+                                                      RequestProxyMode>(
+                                                    value:
+                                                        RequestProxyMode.follow,
+                                                    child: Text(
+                                                        'followSettings'.tr),
+                                                  ),
+                                                  DropdownMenuItem<
+                                                      RequestProxyMode>(
+                                                    value:
+                                                        RequestProxyMode.none,
+                                                    child: Text('noProxy'.tr),
+                                                  ),
+                                                  DropdownMenuItem<
+                                                      RequestProxyMode>(
+                                                    value:
+                                                        RequestProxyMode.custom,
+                                                    child:
+                                                        Text('customProxy'.tr),
+                                                  ),
+                                                ],
+                                              ))
+                                        ],
+                                      ),
+                                    ),
+                                    ...(controller.proxyConfig.value?.mode ==
+                                            RequestProxyMode.custom
+                                        ? [
+                                            SizedBox(
+                                              width: 150,
+                                              child: DropdownButtonFormField<
+                                                  String>(
+                                                value: controller
+                                                    .proxyConfig.value?.scheme,
+                                                onChanged: (value) async {
+                                                  if (value != null) {}
+                                                },
+                                                items: const [
+                                                  DropdownMenuItem<String>(
+                                                    value: 'http',
+                                                    child: Text('HTTP'),
+                                                  ),
+                                                  DropdownMenuItem<String>(
+                                                    value: 'https',
+                                                    child: Text('HTTPS'),
+                                                  ),
+                                                  DropdownMenuItem<String>(
+                                                    value: 'socks5',
+                                                    child: Text('SOCKS5'),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            Row(children: [
+                                              Flexible(
+                                                child: TextFormField(
+                                                  controller:
+                                                      _proxyIpController,
+                                                  decoration: InputDecoration(
+                                                    labelText: 'server'.tr,
+                                                    contentPadding:
+                                                        const EdgeInsets.all(
+                                                            0.0),
+                                                  ),
+                                                ),
+                                              ),
+                                              const Padding(
+                                                  padding: EdgeInsets.only(
+                                                      left: 10)),
+                                              Flexible(
+                                                child: TextFormField(
+                                                  controller:
+                                                      _proxyPortController,
+                                                  decoration: InputDecoration(
+                                                    labelText: 'port'.tr,
+                                                    contentPadding:
+                                                        const EdgeInsets.all(
+                                                            0.0),
+                                                  ),
+                                                  keyboardType:
+                                                      TextInputType.number,
+                                                  inputFormatters: [
+                                                    FilteringTextInputFormatter
+                                                        .digitsOnly,
+                                                    NumericalRangeFormatter(
+                                                        min: 0, max: 65535),
+                                                  ],
+                                                ),
+                                              ),
+                                            ]),
+                                            Row(children: [
+                                              Flexible(
+                                                child: TextFormField(
+                                                  controller:
+                                                      _proxyUsrController,
+                                                  decoration: InputDecoration(
+                                                    labelText: 'username'.tr,
+                                                    contentPadding:
+                                                        const EdgeInsets.all(
+                                                            0.0),
+                                                  ),
+                                                ),
+                                              ),
+                                              const Padding(
+                                                  padding: EdgeInsets.only(
+                                                      left: 10)),
+                                              Flexible(
+                                                child: TextFormField(
+                                                  controller:
+                                                      _proxyPwdController,
+                                                  decoration: InputDecoration(
+                                                    labelText: 'password'.tr,
+                                                    contentPadding:
+                                                        const EdgeInsets.all(
+                                                            0.0),
+                                                  ),
+                                                ),
+                                              ),
+                                            ])
+                                          ]
+                                        : const []),
+                                  ],
+                                ),
+                                const Divider(),
+                                TabBar(
+                                  controller: controller.advancedTabController,
+                                  tabs: const [
+                                    Tab(
+                                      text: 'HTTP',
+                                    ),
+                                    Tab(
+                                      text: 'BitTorrent',
+                                    )
+                                  ],
+                                ),
+                                DefaultTabController(
+                                  length: 2,
+                                  child: ContentSizeTabBarView(
+                                    controller:
+                                        controller.advancedTabController,
+                                    children: [
+                                      Column(
+                                        children: [
+                                          ..._httpHeaderControllers.map((e) {
+                                            return Row(
+                                              children: [
+                                                Flexible(
+                                                  child: TextFormField(
+                                                    controller: e.name,
+                                                    decoration: InputDecoration(
+                                                      hintText:
+                                                          'httpHeaderName'.tr,
+                                                    ),
+                                                  ),
+                                                ),
+                                                const Padding(
+                                                    padding: EdgeInsets.only(
+                                                        left: 10)),
+                                                Flexible(
+                                                  child: TextFormField(
+                                                    controller: e.value,
+                                                    decoration: InputDecoration(
+                                                      hintText:
+                                                          'httpHeaderValue'.tr,
+                                                    ),
+                                                  ),
+                                                ),
+                                                const Padding(
+                                                    padding: EdgeInsets.only(
+                                                        left: 10)),
+                                                IconButton(
+                                                  icon: const Icon(Icons.add),
+                                                  onPressed: () {
+                                                    _httpHeaderControllers.add(
+                                                      (
+                                                        name:
+                                                            TextEditingController(),
+                                                        value:
+                                                            TextEditingController(),
+                                                      ),
+                                                    );
+                                                    controller.showAdvanced
+                                                        .update((val) => val);
+                                                  },
+                                                ),
+                                                IconButton(
+                                                  icon:
+                                                      const Icon(Icons.remove),
+                                                  onPressed: () {
+                                                    if (_httpHeaderControllers
+                                                            .length <=
+                                                        1) {
+                                                      return;
+                                                    }
+                                                    _httpHeaderControllers
+                                                        .remove(e);
+                                                    controller.showAdvanced
+                                                        .update((val) => val);
+                                                  },
+                                                ),
+                                              ],
+                                            );
+                                          }),
+                                          Padding(
+                                            padding:
+                                                const EdgeInsets.only(top: 10),
+                                            child: CompactCheckbox(
+                                              label: 'skipVerifyCert'.tr,
+                                              value: _skipVerifyCertController
+                                                  .value,
+                                              onChanged: (bool? value) {
+                                                _skipVerifyCertController
+                                                    .value = value ?? false;
+                                              },
+                                              textStyle: const TextStyle(
+                                                color: Colors.grey,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      Column(
+                                        children: [
+                                          TextFormField(
+                                              controller: _btTrackerController,
+                                              maxLines: 5,
+                                              decoration: InputDecoration(
+                                                labelText: 'Trackers',
+                                                hintText: 'addTrackerHit'.tr,
+                                              )),
+                                        ],
+                                      )
+                                    ],
+                                  ),
+                                )
+                              ],
+                            ).paddingOnly(top: 16),
                           ),
                         ),
-                        SizedBox(
-                          width: 150,
-                          child: RoundedLoadingButton(
-                            color: Get.theme.colorScheme.secondary,
-                            onPressed: _doResolve,
-                            controller: _confirmController,
-                            child: Text('confirm'.tr),
-                          ),
-                        ),
-                      ],
+                      ]),
                     ),
-                  )),
-                ]))),
+                    Center(
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 15),
+                        child: Column(
+                          children: [
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CompactCheckbox(
+                                    label: 'directDownload'.tr,
+                                    value: controller.directDownload.value,
+                                    onChanged: (bool? value) {
+                                      controller.directDownload.value =
+                                          value ?? false;
+                                    }),
+                                TextButton(
+                                  onPressed: () {
+                                    controller.showAdvanced.value =
+                                        !controller.showAdvanced.value;
+                                  },
+                                  child: Row(children: [
+                                    Obx(() => Checkbox(
+                                          value: controller.showAdvanced.value,
+                                          onChanged: (bool? value) {
+                                            controller.showAdvanced.value =
+                                                value ?? false;
+                                          },
+                                        )),
+                                    Text('advancedOptions'.tr),
+                                  ]),
+                                ),
+                              ],
+                            ),
+                            SizedBox(
+                              width: 150,
+                              child: RoundedLoadingButton(
+                                color: Get.theme.colorScheme.secondary,
+                                onPressed: _doConfirm,
+                                controller: _confirmController,
+                                child: Text('confirm'.tr),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
 
-  Future<void> _doResolve() async {
-    if (controller.isResolving.value) {
+  // recognize magnet uri, if length == 40, auto add magnet prefix
+  recognizeMagnetUri(String text) {
+    if (text.length != 40) {
       return;
     }
-    controller.isResolving.value = true;
+    final exp = RegExp(r"[0-9a-fA-F]+");
+    if (exp.hasMatch(text)) {
+      final uri = "magnet:?xt=urn:btih:$text";
+      _urlController.text = uri;
+      _urlController.selection = TextSelection.fromPosition(
+          TextPosition(offset: _urlController.text.length));
+    }
+  }
+
+  Future<void> _doConfirm() async {
+    if (controller.isConfirming.value) {
+      return;
+    }
+    controller.isConfirming.value = true;
     try {
       _confirmController.start();
-      if (_resolveFormKey.currentState!.validate()) {
-        Object? extra;
-        if (controller.showAdvanced.value) {
-          final u = Uri.parse(_urlController.text);
-          if (u.scheme.startsWith("http")) {
-            extra = ReqExtraHttp()
-              ..header = {
-                "User-Agent": _httpUaController.text,
-                "Cookie": _httpCookieController.text,
-                "Referer": _httpRefererController.text,
-              };
-          } else {
-            extra = ReqExtraBt()
-              ..trackers = Util.textToLines(_btTrackerController.text);
+      if (_confirmFormKey.currentState!.validate()) {
+        final isWebFileChosen =
+            Util.isWeb() && controller.fileDataUri.isNotEmpty;
+        final submitUrl = isWebFileChosen
+            ? controller.fileDataUri.value
+            : _urlController.text.trim();
+
+        final urls = Util.textToLines(submitUrl);
+        // Add url to the history
+        if (!isWebFileChosen) {
+          for (final url in urls) {
+            Database.instance.saveCreateHistory(url);
           }
         }
-        final rr = await resolve(Request(
-          url: _urlController.text,
-          extra: extra,
-        ));
-        await _showResolveDialog(rr);
+
+        /*
+        Check if is direct download, there has two ways to direct download
+        1. Direct download option is checked
+        2. Muli line urls
+        */
+        final isMultiLine = urls.length > 1;
+        final isDirect = controller.directDownload.value || isMultiLine;
+        if (isDirect) {
+          await Future.wait(urls.map((url) {
+            return createTask(CreateTask(
+                req: Request(
+                  url: url,
+                  extra: parseReqExtra(url),
+                  proxy: parseProxy(),
+                  skipVerifyCert: _skipVerifyCertController.value,
+                ),
+                opt: Options(
+                  name: isMultiLine ? "" : _renameController.text,
+                  path: _pathController.text,
+                  selectFiles: [],
+                  extra: parseReqOptsExtra(),
+                )));
+          }));
+          Get.rootDelegate.offNamed(Routes.TASK);
+        } else {
+          final rr = await resolve(Request(
+            url: submitUrl,
+            extra: parseReqExtra(_urlController.text),
+            proxy: parseProxy(),
+            skipVerifyCert: _skipVerifyCertController.value,
+          ));
+          await _showResolveDialog(rr);
+        }
       }
     } catch (e) {
       showErrorMessage(e);
     } finally {
       _confirmController.reset();
-      controller.isResolving.value = false;
+      controller.isConfirming.value = false;
     }
+  }
+
+  RequestProxy? parseProxy() {
+    if (controller.proxyConfig.value?.mode == RequestProxyMode.custom) {
+      return RequestProxy()
+        ..mode = RequestProxyMode.custom
+        ..scheme = _proxyIpController.text
+        ..host = "${_proxyIpController.text}:${_proxyPortController.text}"
+        ..usr = _proxyUsrController.text
+        ..pwd = _proxyPwdController.text;
+    }
+    return controller.proxyConfig.value;
+  }
+
+  Object? parseReqExtra(String url) {
+    Object? reqExtra;
+    if (controller.showAdvanced.value) {
+      switch (controller.advancedTabController.index) {
+        case 0:
+          final header = Map<String, String>.fromEntries(_httpHeaderControllers
+              .map((e) => MapEntry(e.name.text, e.value.text)));
+          header.removeWhere(
+              (key, value) => key.trim().isEmpty || value.trim().isEmpty);
+          if (header.isNotEmpty) {
+            reqExtra = ReqExtraHttp()..header = header;
+          }
+          break;
+        case 1:
+          if (_btTrackerController.text.trim().isNotEmpty) {
+            reqExtra = ReqExtraBt()
+              ..trackers = Util.textToLines(_btTrackerController.text);
+          }
+          break;
+      }
+    }
+    return reqExtra;
+  }
+
+  Object? parseReqOptsExtra() {
+    return OptsExtraHttp()
+      ..connections = int.tryParse(_connectionsController.text) ?? 0
+      ..autoTorrent = true;
   }
 
   String _hitText() {
     return 'downloadLinkHit'.trParams({
-      'append': Util.isDesktop() ? 'downloadLinkHitDesktop'.tr : '',
+      'append':
+          Util.isDesktop() || Util.isWeb() ? 'downloadLinkHitDesktop'.tr : '',
     });
   }
 
   Future<void> _showResolveDialog(ResolveResult rr) async {
-    final files = rr.res.files;
-    final appController = Get.find<AppController>();
-
     final createFormKey = GlobalKey<FormState>();
-    final nameController = TextEditingController();
-    final connectionsController = TextEditingController();
-    final pathController = TextEditingController(
-        text: appController.downloaderConfig.value.downloadDir);
     final downloadController = RoundedLoadingButtonController();
     return showDialog<void>(
         context: Get.context!,
         barrierDismissible: false,
         builder: (_) => AlertDialog(
+              title: rr.res.name.isEmpty ? null : Text(rr.res.name),
               content: Builder(
                 builder: (context) {
                   // Get available height and width of the build area of this widget. Make a choice depending on the size.
@@ -260,35 +814,17 @@ class CreateView extends GetView<CreateController> {
                   var width = MediaQuery.of(context).size.width;
 
                   return SizedBox(
-                    height: height * 0.5,
+                    height: height * 0.75,
                     width: width,
                     child: Form(
                         key: createFormKey,
                         autovalidateMode: AutovalidateMode.always,
-                        child: Column(
-                          children: [
-                            Expanded(child: FileListView(files: files)),
-                            TextFormField(
-                              controller: nameController,
-                              decoration: InputDecoration(
-                                labelText: 'rename'.tr,
-                              ),
-                            ),
-                            TextFormField(
-                              controller: connectionsController,
-                              decoration: InputDecoration(
-                                labelText: 'connections'.tr,
-                              ),
-                              keyboardType: TextInputType.number,
-                              inputFormatters: [
-                                FilteringTextInputFormatter.digitsOnly,
-                                NumericalRangeFormatter(min: 1, max: 256),
-                              ],
-                            ),
-                            DirectorySelector(
-                              controller: pathController,
-                            ),
-                          ],
+                        child: FileTreeView(
+                          files: rr.res.files,
+                          initialValues: rr.res.files.asMap().keys.toList(),
+                          onSelectionChanged: (List<int> values) {
+                            controller.selectedIndexes.value = values;
+                          },
                         )),
                   );
                 },
@@ -325,19 +861,31 @@ class CreateView extends GetView<CreateController> {
                             showMessage('tip'.tr, 'noFileSelected'.tr);
                             return;
                           }
+                          final optExtra = parseReqOptsExtra();
                           if (createFormKey.currentState!.validate()) {
-                            await createTask(CreateTask(
-                                rid: rr.id,
-                                opts: Options(
-                                    name: nameController.text,
-                                    path: pathController.text,
-                                    selectFiles:
-                                        controller.selectedIndexes.cast<int>(),
-                                    extra: connectionsController.text.isEmpty
-                                        ? null
-                                        : (OptsExtraHttp()
-                                          ..connections = int.parse(
-                                              connectionsController.text)))));
+                            if (rr.id.isEmpty) {
+                              // from extension resolve result
+                              await Future.wait(
+                                  controller.selectedIndexes.map((index) {
+                                final file = rr.res.files[index];
+                                return createTask(CreateTask(
+                                    req: file.req!..proxy = parseProxy(),
+                                    opt: Options(
+                                        name: file.name,
+                                        path: path.join(_pathController.text,
+                                            rr.res.name, file.path),
+                                        selectFiles: [],
+                                        extra: optExtra)));
+                              }));
+                            } else {
+                              await createTask(CreateTask(
+                                  rid: rr.id,
+                                  opt: Options(
+                                      name: _renameController.text,
+                                      path: _pathController.text,
+                                      selectFiles: controller.selectedIndexes,
+                                      extra: optExtra)));
+                            }
                             Get.back();
                             Get.rootDelegate.offNamed(Routes.TASK);
                           }

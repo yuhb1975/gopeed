@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-
+ui/flutter/dist/
 # Test binary, built with `go test -c`
 *.test
 
@@ -25,4 +25,8 @@ bin/
 
 .DS_Store
 
-dist/
+node_modules/
+cmd/web/dist/
+.test_storage/
+.test_download/
+/extensions

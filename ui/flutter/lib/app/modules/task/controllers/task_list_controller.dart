@@ -7,10 +7,12 @@ import '../../../../api/model/task.dart';
 
 abstract class TaskListController extends GetxController {
   List<Status> statuses;
+  int Function(Task a, Task b) compare;
 
-  TaskListController(this.statuses);
+  TaskListController(this.statuses, this.compare);
 
   final tasks = <Task>[].obs;
+  final selectedTaskIds = <String>[].obs;
   final isRunning = false.obs;
 
   late final Timer _timer;
@@ -43,6 +45,9 @@ abstract class TaskListController extends GetxController {
   }
 
   getTasksState() async {
-    tasks.value = await getTasks(statuses);
+    final tasks = await getTasks(statuses);
+    // sort tasks by create time
+    tasks.sort(compare);
+    this.tasks.value = tasks;
   }
 }

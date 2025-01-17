@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 
-import '../../../../generated/locales.g.dart';
+import '../../../../i18n/message.dart';
 import '../../../../theme/theme.dart';
 import '../../../../util/locale_manager.dart';
 import '../../../routes/app_pages.dart';
@@ -14,24 +15,24 @@ class AppView extends GetView<AppController> {
   @override
   Widget build(BuildContext context) {
     final config = controller.downloaderConfig.value;
-    return GetMaterialApp.router(
-      useInheritedMediaQuery: true,
-      debugShowCheckedModeBanner: false,
-      theme: GopeedTheme.light,
-      darkTheme: GopeedTheme.dark,
-      themeMode: ThemeMode.values.byName(config.extra.themeMode),
-      // translations: messages,
-      translationsKeys: AppTranslation.translations,
-      locale: toLocale(config.extra.locale),
-      fallbackLocale: fallbackLocale,
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      supportedLocales:
-          AppTranslation.translations.keys.map((e) => toLocale(e)).toList(),
-      getPages: AppPages.routes,
+    return WithForegroundTask(
+      child: GetMaterialApp.router(
+        useInheritedMediaQuery: true,
+        debugShowCheckedModeBanner: false,
+        theme: GopeedTheme.light,
+        darkTheme: GopeedTheme.dark,
+        themeMode: ThemeMode.values.byName(config.extra.themeMode),
+        translations: messages,
+        locale: toLocale(config.extra.locale),
+        fallbackLocale: fallbackLocale,
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        supportedLocales: messages.keys.keys.map((e) => toLocale(e)).toList(),
+        getPages: AppPages.routes,
+      ),
     );
   }
 }

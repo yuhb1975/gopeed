@@ -27,13 +27,12 @@ var (
 		Extra: map[string]any{
 			"method": "",
 			"header": map[string]string{
-				"User-Agent": "gopeed",
+				"Usr-Agent": "gopeed",
 			},
 			"body": "",
 		},
 	}
 	taskRes = &base.Resource{
-		Name:  test.BuildName,
 		Size:  test.BuildSize,
 		Range: true,
 		Files: []*base.FileInfo{
@@ -44,28 +43,77 @@ var (
 			},
 		},
 	}
-	createReq = &model.CreateTask{
-		Req: taskReq,
-		Opts: &base.Options{
-			Path: test.Dir,
-			Name: test.DownloadName,
-			Extra: map[string]any{
-				"connections": 2,
-			},
+	createOpts = &base.Options{
+		Path: test.Dir,
+		Name: test.DownloadName,
+		Extra: map[string]any{
+			"connections": 2,
 		},
 	}
+	createReq = &model.CreateTask{
+		Req: taskReq,
+		Opt: createOpts,
+	}
+	createResoledReq = &model.CreateTask{
+		Req: taskReq,
+		Opt: createOpts,
+	}
+	installExtensionReq = &model.InstallExtension{
+		URL: "https://github.com/GopeedLab/gopeed-extension-samples#github-contributor-avatars-sample",
+	}
 )
+
+func TestInfo(t *testing.T) {
+	matchKeys := []string{"version", "runtime", "os", "arch", "inDocker"}
+	doTest(func() {
+		resp := httpRequestCheckOk[map[string]any](http.MethodGet, "/api/v1/info", nil)
+		for _, key := range matchKeys {
+			if _, ok := resp[key]; !ok {
+				t.Errorf("Info() missing key = %v", key)
+			}
+		}
+	})
+}
 
 func TestResolve(t *testing.T) {
 	doTest(func() {
 		resp := httpRequestCheckOk[*download.ResolveResult](http.MethodPost, "/api/v1/resolve", taskReq)
-		if !test.JsonEqual(taskRes, resp.Res) {
+		if !test.AssertResourceEqual(taskRes, resp.Res) {
 			t.Errorf("Resolve() got = %v, want %v", test.ToJson(resp.Res), test.ToJson(taskRes))
 		}
 	})
 }
 
 func TestCreateTask(t *testing.T) {
+	doTest(func() {
+		resp := httpRequestCheckOk[*download.ResolveResult](http.MethodPost, "/api/v1/resolve", taskReq)
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		Downloader.Listener(func(event *download.Event) {
+			if event.Key == download.EventKeyFinally {
+				wg.Done()
+			}
+		})
+
+		taskId := httpRequestCheckOk[string](http.MethodPost, "/api/v1/tasks", &model.CreateTask{
+			Rid: resp.ID,
+			Opt: createOpts,
+		})
+		if taskId == "" {
+			t.Fatal("create task failed")
+		}
+
+		wg.Wait()
+		want := test.FileMd5(test.BuildFile)
+		got := test.FileMd5(test.DownloadFile)
+		if want != got {
+			t.Errorf("CreateTask() got = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestCreateDirectTask(t *testing.T) {
 	doTest(func() {
 		var wg sync.WaitGroup
 		wg.Add(1)
@@ -84,32 +132,56 @@ func TestCreateTask(t *testing.T) {
 		want := test.FileMd5(test.BuildFile)
 		got := test.FileMd5(test.DownloadFile)
 		if want != got {
-			t.Errorf("CreateTask() got = %v, want %v", got, want)
+			t.Errorf("CreateDirectTask() got = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestCreateDirectTaskBatch(t *testing.T) {
+	doTest(func() {
+		reqs := make([]*base.Request, 0)
+		for i := 0; i < 5; i++ {
+			reqs = append(reqs, createReq.Req)
+		}
+		taskIds := httpRequestCheckOk[[]string](http.MethodPost, "/api/v1/tasks/batch", &model.CreateTaskBatch{
+			Reqs: reqs,
+		})
+		if len(taskIds) != len(reqs) {
+			t.Errorf("CreateDirectTaskBatch() got = %v, want %v", len(taskIds), len(reqs))
+		}
+	})
+}
+
+func TestCreateDirectTaskWithResoled(t *testing.T) {
+	doTest(func() {
+		var wg sync.WaitGroup
+		wg.Add(1)
+		Downloader.Listener(func(event *download.Event) {
+			if event.Key == download.EventKeyFinally {
+				wg.Done()
+			}
+		})
+
+		taskId := httpRequestCheckOk[string](http.MethodPost, "/api/v1/tasks", createResoledReq)
+		if taskId == "" {
+			t.Fatal("create task failed")
+		}
+
+		wg.Wait()
+		want := test.FileMd5(test.BuildFile)
+		got := test.FileMd5(test.DownloadFile)
+		if want != got {
+			t.Errorf("CreateDirectTaskWithResoled() got = %v, want %v", got, want)
 		}
 	})
 }
 
 func TestPauseAndContinueTask(t *testing.T) {
 	doTest(func() {
-		type result struct {
-			pauseCount    int
-			continueCount int
-			md5           string
-		}
-
-		var got = result{
-			pauseCount:    0,
-			continueCount: 0,
-			md5:           "",
-		}
 		var wg sync.WaitGroup
 		wg.Add(1)
 		Downloader.Listener(func(event *download.Event) {
 			switch event.Key {
-			case download.EventKeyPause:
-				got.pauseCount++
-			case download.EventKeyContinue:
-				got.continueCount++
 			case download.EventKeyFinally:
 				wg.Done()
 			}
@@ -132,12 +204,8 @@ func TestPauseAndContinueTask(t *testing.T) {
 		}
 
 		wg.Wait()
-		want := result{
-			pauseCount:    1,
-			continueCount: 1,
-			md5:           test.FileMd5(test.BuildFile),
-		}
-		got.md5 = test.FileMd5(test.DownloadFile)
+		want := test.FileMd5(test.BuildFile)
+		got := test.FileMd5(test.DownloadFile)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("PauseAndContinueTask() got = %v, want %v", got, want)
 		}
@@ -163,17 +231,18 @@ func TestPauseAllAndContinueALLTasks(t *testing.T) {
 
 		// continue all
 		httpRequestCheckOk[any](http.MethodPut, "/api/v1/tasks/continue", nil)
+		time.Sleep(time.Millisecond * 100)
 		tasks := httpRequestCheckOk[[]*download.Task](http.MethodGet, fmt.Sprintf("/api/v1/tasks?status=%s", base.DownloadStatusRunning), nil)
 		if len(tasks) != cfg.MaxRunning {
 			t.Errorf("ContinueAllTasks() got = %v, want %v", len(tasks), cfg.MaxRunning)
 		}
 		// pause all
 		httpRequestCheckOk[any](http.MethodPut, "/api/v1/tasks/pause", nil)
-		tasks = httpRequestCheckOk[[]*download.Task](http.MethodGet, fmt.Sprintf("/api/v1/tasks?status=%s,%s", base.DownloadStatusReady, base.DownloadStatusPause), nil)
+		time.Sleep(time.Millisecond * 100)
+		tasks = httpRequestCheckOk[[]*download.Task](http.MethodGet, fmt.Sprintf("/api/v1/tasks?status=%s", base.DownloadStatusPause), nil)
 		if len(tasks) != total {
 			t.Errorf("PauseAllTasks() got = %v, want %v", len(tasks), total)
 		}
-
 	})
 }
 
@@ -200,6 +269,58 @@ func TestDeleteTaskForce(t *testing.T) {
 	})
 }
 
+func TestDeleteAllTasks(t *testing.T) {
+	doTest(func() {
+		taskCount := 3
+
+		var wg sync.WaitGroup
+		wg.Add(taskCount)
+		Downloader.Listener(func(event *download.Event) {
+			if event.Key == download.EventKeyFinally {
+				wg.Done()
+			}
+		})
+
+		for i := 0; i < taskCount; i++ {
+			httpRequestCheckOk[string](http.MethodPost, "/api/v1/tasks", createReq)
+		}
+
+		wg.Wait()
+
+		httpRequestCheckOk[any](http.MethodDelete, "/api/v1/tasks?force=true", nil)
+		tasks := httpRequestCheckOk[[]*download.Task](http.MethodGet, "/api/v1/tasks", nil)
+		if len(tasks) != 0 {
+			t.Errorf("DeleteTasks() got = %v, want %v", len(tasks), 0)
+		}
+	})
+}
+
+func TestDeleteTasksByStatues(t *testing.T) {
+	doTest(func() {
+		taskCount := 3
+
+		var wg sync.WaitGroup
+		wg.Add(taskCount)
+		Downloader.Listener(func(event *download.Event) {
+			if event.Key == download.EventKeyFinally {
+				wg.Done()
+			}
+		})
+
+		for i := 0; i < taskCount; i++ {
+			httpRequestCheckOk[string](http.MethodPost, "/api/v1/tasks", createReq)
+		}
+
+		wg.Wait()
+
+		httpRequestCheckOk[any](http.MethodDelete, fmt.Sprintf("/api/v1/tasks?status=%s&force=true", base.DownloadStatusDone), nil)
+		tasks := httpRequestCheckOk[[]*download.Task](http.MethodGet, "/api/v1/tasks", nil)
+		if len(tasks) != 0 {
+			t.Errorf("DeleteTasks() got = %v, want %v", len(tasks), 0)
+		}
+	})
+}
+
 func TestGetTasks(t *testing.T) {
 	doTest(func() {
 		var wg sync.WaitGroup
@@ -210,7 +331,7 @@ func TestGetTasks(t *testing.T) {
 			}
 		})
 
-		httpRequestCheckOk[string](http.MethodPost, fmt.Sprintf("/api/v1/tasks?status=%s,%s",
+		httpRequestCheckOk[string](http.MethodPost, fmt.Sprintf("/api/v1/tasks?status=%s&status=%s",
 			base.DownloadStatusReady, base.DownloadStatusRunning), createReq)
 		httpRequestCheckOk[[]*download.Task](http.MethodGet, "/api/v1/tasks", nil)
 
@@ -230,7 +351,7 @@ func TestGetTasks(t *testing.T) {
 
 func TestGetAndPutConfig(t *testing.T) {
 	doTest(func() {
-		cfg := httpRequestCheckOk[*download.DownloaderStoreConfig](http.MethodGet, "/api/v1/config", nil)
+		cfg := httpRequestCheckOk[*base.DownloaderStoreConfig](http.MethodGet, "/api/v1/config", nil)
 		cfg.DownloadDir = "./download"
 		cfg.Extra = map[string]any{
 			"serverConfig": &Config{
@@ -241,9 +362,118 @@ func TestGetAndPutConfig(t *testing.T) {
 		}
 		httpRequestCheckOk[any](http.MethodPut, "/api/v1/config", cfg)
 
-		newCfg := httpRequestCheckOk[*download.DownloaderStoreConfig](http.MethodGet, "/api/v1/config", nil)
+		newCfg := httpRequestCheckOk[*base.DownloaderStoreConfig](http.MethodGet, "/api/v1/config", nil)
 		if !test.JsonEqual(cfg, newCfg) {
 			t.Errorf("GetAndPutConfig() got = %v, want %v", test.ToJson(newCfg), test.ToJson(cfg))
+		}
+	})
+}
+
+func TestInstallExtension(t *testing.T) {
+	doTest(func() {
+		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
+		if identity == "" {
+			t.Errorf("InstallExtension() got = %v, want %v", identity, "not empty")
+		}
+
+		// not a valid extension repository
+		code, _ := httpRequest[string](http.MethodPost, "/api/v1/extensions", &model.InstallExtension{
+			URL: "https://github.com/GopeedLab/gopeed",
+		})
+		checkCode(code, model.CodeError)
+
+		// not a git repository
+		code, _ = httpRequest[string](http.MethodPost, "/api/v1/extensions", &model.InstallExtension{
+			URL: "https://github.com",
+		})
+		checkCode(code, model.CodeError)
+	})
+}
+
+func TestGetExtensions(t *testing.T) {
+	doTest(func() {
+		httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
+		extensions := httpRequestCheckOk[[]*download.Extension](http.MethodGet, "/api/v1/extensions", nil)
+		if len(extensions) == 0 {
+			t.Errorf("GetExtensions() got = %v, want %v", len(extensions), "not empty")
+		}
+	})
+}
+
+func TestUpdateExtensionSettings(t *testing.T) {
+	doTest(func() {
+		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
+
+		httpRequestCheckOk[any](http.MethodPut, "/api/v1/extensions/"+identity+"/settings", &model.UpdateExtensionSettings{
+			Settings: map[string]any{
+				"undefined": "test",
+				"ua":        "test",
+			},
+		})
+
+		settings := httpRequestCheckOk[*download.Extension](http.MethodGet, "/api/v1/extensions/"+identity, nil).Settings
+		if len(settings) != 1 {
+			t.Errorf("UpdateExtensionSettings() got = %v, want %v", len(settings), 1)
+		}
+
+		if settings[0].Name != "ua" || settings[0].Value != "test" {
+			t.Errorf("UpdateExtensionSettings() got = %v, want %v", settings[0].Value, "test")
+		}
+	})
+}
+
+func TestSwitchExtension(t *testing.T) {
+	doTest(func() {
+		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
+		httpRequestCheckOk[any](http.MethodPut, "/api/v1/extensions/"+identity+"/switch", &model.SwitchExtension{
+			Status: false,
+		})
+		extensions := httpRequestCheckOk[[]*download.Extension](http.MethodGet, "/api/v1/extensions", nil)
+		if !extensions[0].Disabled {
+			t.Errorf("TestSwitchExtension() got = %v, want %v", extensions[0].Disabled, true)
+		}
+	})
+}
+
+func TestDeleteExtension(t *testing.T) {
+	doTest(func() {
+		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
+		httpRequestCheckOk[any](http.MethodDelete, "/api/v1/extensions/"+identity, nil)
+		extensions := httpRequestCheckOk[[]*download.Extension](http.MethodGet, "/api/v1/extensions", nil)
+		if len(extensions) != 0 {
+			t.Errorf("TestDeleteExtension() got = %v, want %v", len(extensions), 0)
+		}
+	})
+}
+
+func TestUpdateCheckExtension(t *testing.T) {
+	doTest(func() {
+		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
+		resp := httpRequestCheckOk[*model.UpdateCheckExtensionResp](http.MethodGet, "/api/v1/extensions/"+identity+"/update", nil)
+		// no new version
+		if resp.NewVersion != "" {
+			t.Errorf("UpdateCheckExtension() got = %v, want %v", resp.NewVersion, "")
+		}
+		// force update
+		httpRequestCheckOk[any](http.MethodPost, "/api/v1/extensions/"+identity+"/update", nil)
+	})
+}
+
+func TestFsExtension(t *testing.T) {
+	doTest(func() {
+		identity := httpRequestCheckOk[string](http.MethodPost, "/api/v1/extensions", installExtensionReq)
+		statusCode, _ := doHttpRequest0(http.MethodGet, "/fs/extensions/"+identity+"/icon.png", nil, nil)
+		if statusCode != http.StatusOK {
+			t.Errorf("FsExtension() got = %v, want %v", statusCode, http.StatusOK)
+		}
+	})
+}
+
+func TestFsExtensionFail(t *testing.T) {
+	doTest(func() {
+		statusCode, _ := doHttpRequest0(http.MethodGet, "/fs/extensions/not_exist/icon.png", nil, nil)
+		if statusCode != http.StatusNotFound {
+			t.Errorf("TestFsExtensionFail() got = %v, want %v", statusCode, http.StatusNotFound)
 		}
 	})
 }
@@ -273,7 +503,7 @@ func TestDoProxy(t *testing.T) {
 	})
 }
 
-func TestAuthorization(t *testing.T) {
+func TestApiToken(t *testing.T) {
 	var cfg = &model.StartConfig{}
 	cfg.Init()
 	cfg.ApiToken = "123456"
@@ -285,14 +515,55 @@ func TestAuthorization(t *testing.T) {
 		Stop()
 	}()
 
-	code, _ := doHttpRequest[any](http.MethodGet, "/api/v1/config", nil, nil)
-	checkCode(code, model.CodeUnauthorized)
+	status, _ := doHttpRequest0(http.MethodGet, "/api/v1/config", nil, nil)
+	if status != http.StatusUnauthorized {
+		t.Errorf("TestApiToken() got = %v, want %v", status, http.StatusUnauthorized)
+	}
 
-	code, _ = doHttpRequest[any](http.MethodGet, "/api/v1/config", map[string]string{
+	status, _ = doHttpRequest0(http.MethodGet, "/api/v1/config", map[string]string{
 		"X-Api-Token": cfg.ApiToken,
 	}, nil)
-	checkCode(code, model.CodeOk)
+	if status != http.StatusOK {
+		t.Errorf("TestApiToken() got = %v, want %v", status, http.StatusOK)
+	}
 
+}
+
+func TestAuthorization(t *testing.T) {
+	var cfg = &model.StartConfig{}
+	cfg.Init()
+	cfg.ApiToken = "123456"
+	cfg.WebEnable = true
+	cfg.WebBasicAuth = &model.WebBasicAuth{
+		Username: "admin",
+		Password: "123456",
+	}
+	fileListener := doStart(cfg)
+	defer func() {
+		if err := fileListener.Close(); err != nil {
+			panic(err)
+		}
+		Stop()
+	}()
+
+	status, _ := doHttpRequest0(http.MethodGet, "/api/v1/config", nil, nil)
+	if status != http.StatusUnauthorized {
+		t.Errorf("TestAuthorization() got = %v, want %v", status, http.StatusUnauthorized)
+	}
+
+	status, _ = doHttpRequest0(http.MethodGet, "/api/v1/config", map[string]string{
+		"Authorization": cfg.WebBasicAuth.Authorization(),
+	}, nil)
+	if status != http.StatusOK {
+		t.Errorf("TestAuthorization() got = %v, want %v", status, http.StatusOK)
+	}
+
+	status, _ = doHttpRequest0(http.MethodGet, "/api/v1/config", map[string]string{
+		"X-Api-Token": cfg.ApiToken,
+	}, nil)
+	if status != http.StatusOK {
+		t.Errorf("TestAuthorization() got = %v, want %v", status, http.StatusOK)
+	}
 }
 
 func doTest(handler func()) {
@@ -300,23 +571,20 @@ func doTest(handler func()) {
 		var cfg = &model.StartConfig{}
 		cfg.Init()
 		cfg.Storage = storage
+		cfg.StorageDir = ".test_storage"
+		cfg.WebEnable = true
 		fileListener := doStart(cfg)
 		defer func() {
 			if err := fileListener.Close(); err != nil {
 				panic(err)
 			}
 			Stop()
+			Downloader.Clear()
 		}()
-		defer Downloader.Clear()
 		defer func() {
-			tasks := Downloader.GetTasks()
-			taskIds := make([]string, len(tasks))
-			for i, task := range tasks {
-				taskIds[i] = task.ID
-			}
-			for _, id := range taskIds {
-				Downloader.Delete(id, true)
-			}
+			Downloader.Pause(nil)
+			Downloader.Delete(nil, true)
+			os.RemoveAll(cfg.StorageDir)
 		}()
 		taskReq.URL = "http://" + fileListener.Addr().String() + "/" + test.BuildName
 		handler()

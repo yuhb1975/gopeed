@@ -2,10 +2,19 @@ name: build
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: "Build platform"
+        required: true
+        default: "all"
+      test:
+        description: "Test mode"
+        required: true
+        default: "false"
 
 env:
-  GO_VERSION: 1.19
-  FLUTTER_VERSION: 3.10.6
+  GO_VERSION: "1.23"
+  FLUTTER_VERSION: "3.24.5"
 
 permissions:
   contents: write
@@ -14,16 +23,17 @@ jobs:
   get-release:
     runs-on: ubuntu-latest
     outputs:
-      tag_name: ${{ steps.get-release.outputs.tag_name }}
+      version: ${{ steps.get-release.outputs.version }}
       upload_url: ${{ steps.get-release.outputs.upload_url }}
 
     steps:
-      - uses: monkeyWie/get-latest-release@v1
+      - uses: monkeyWie/get-latest-release@v2.1
         id: get-release
         with:
           myToken: ${{ github.token }}
 
   build-windows:
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows' }}
     runs-on: windows-latest
     needs: [get-release]
     steps:
@@ -36,17 +46,18 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
       - name: Build
         env:
-          VERSION: ${{ needs.get-release.outputs.tag_name }}
+          VERSION: ${{ needs.get-release.outputs.version }}
         run: |
           Invoke-WebRequest -Uri "https://github.com/jrsoftware/issrc/raw/main/Files/Languages/Unofficial/ChineseSimplified.isl" -OutFile "ChineseSimplified.isl"
-          mv ChineseSimplified.isl "C:\Program Files (x86)\Inno Setup 6\Languages\" 
+          mv ChineseSimplified.isl "C:\Program Files (x86)\Inno Setup 6\Languages\"
 
-          go build -tags nosqlite -ldflags="-w -s" -buildmode=c-shared -o ui/flutter/windows/libgopeed.dll github.com/GopeedLab/gopeed/bind/desktop
+          go build -tags nosqlite -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$env:VERSION" -buildmode=c-shared -o ui/flutter/windows/libgopeed.dll github.com/GopeedLab/gopeed/bind/desktop
           cd ui/flutter
+          $TAG = "v$env:VERSION"
           flutter build windows
-          $mingw = "C:\ProgramData\Chocolatey\lib\mingw\tools\install\mingw64\bin"
+          $mingw = "C:\Program Files\Git\mingw64\bin"
           $system = "C:\Windows\System32"
-          $release = "build\windows\runner\Release\"
+          $release = "build\windows\x64\runner\Release\"
           cp $mingw\libstdc++-6.dll $release
           cp $mingw\libgcc_s_seh-1.dll $release
           cp $mingw\libwinpthread-1.dll $release
@@ -55,7 +66,7 @@ jobs:
           cp $system\vcruntime140_1.dll $release
 
           New-Item -Path build\windows\Output -ItemType Directory
-          Compress-Archive -Path "$release*" -DestinationPath "build\windows\Output\Gopeed-$env:VERSION-windows-amd64-portable.zip"
+          Compress-Archive -Path "$release*" -DestinationPath "build\windows\Output\Gopeed-$TAG-windows-amd64-portable.zip"
 
           cd build/windows
           echo @"
@@ -63,7 +74,7 @@ jobs:
           ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
           #define MyAppName "Gopeed"
-          #define MyAppVersion "$($env:VERSION.substring(1))"
+          #define MyAppVersion "$env:VERSION"
           #define MyAppPublisher "monkeyWie"
           #define MyAppURL "https://gopeed.com"
           #define MyAppExeName "gopeed.exe"
@@ -86,11 +97,13 @@ jobs:
           PrivilegesRequired=lowest
           OutputBaseFilename=gopeed
           SetupIconFile=..\..\assets\icon\icon.ico
+          UninstallDisplayIcon={app}\{#MyAppExeName}
           Compression=lzma
           SolidCompression=yes
           WizardStyle=modern
           LanguageDetectionMethod=uilanguage
-          ShowLanguageDialog=yes 
+          ShowLanguageDialog=yes
+          CloseApplications=force
 
           [Languages]
           Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -100,7 +113,7 @@ jobs:
           Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
           [Files]
-          Source: ".\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+          Source: ".\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs;
           ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
           [UninstallDelete]
@@ -109,14 +122,14 @@ jobs:
           [Icons]
           Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
           Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-
+          
           [Run]
           Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
           "@ > setup.iss
           iscc.exe setup.iss
-          mv "Output\gopeed.exe" "Output\Gopeed-$env:VERSION-windows-amd64.exe"
-          Compress-Archive -Path "Output\Gopeed-$env:VERSION-windows-amd64.exe" -DestinationPath "Output\Gopeed-$env:VERSION-windows-amd64.zip"
-          Remove-Item -Path "Output\Gopeed-$env:VERSION-windows-amd64.exe"
+          mv "Output\gopeed.exe" "Output\Gopeed-$TAG-windows-amd64.exe"
+          Compress-Archive -Path "Output\Gopeed-$TAG-windows-amd64.exe" -DestinationPath "Output\Gopeed-$TAG-windows-amd64.zip"
+          Remove-Item -Path "Output\Gopeed-$TAG-windows-amd64.exe"
       - name: Upload
         uses: shogo82148/actions-upload-release-asset@v1
         with:
@@ -124,7 +137,8 @@ jobs:
           asset_path: ui/flutter/build/windows/Output/*
           overwrite: true
   build-macos-arm64-lib:
-    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos' }}
+    runs-on: macos-latest
     needs: [get-release]
     steps:
       - uses: actions/checkout@v3
@@ -132,17 +146,17 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: Build
+        env:
+          VERSION: ${{ needs.get-release.outputs.version }}
         run: |
-          docker pull techknowlogick/xgo:go-1.19.x
-          go install src.techknowlogick.com/xgo@latest
-          xgo --targets=darwin/arm64 -tags="nosqlite" -ldflags="-w -s" -buildmode=c-shared -pkg=bind/desktop -out=libgopeed .
-          mv libgopeed-*.dylib libgopeed.dylib
+          go build -tags nosqlite -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" -buildmode=c-shared -o libgopeed.dylib github.com/GopeedLab/gopeed/bind/desktop
       - uses: actions/upload-artifact@v3
         with:
           name: macos-arm64-lib
           path: libgopeed.dylib
   build-macos:
-    runs-on: macos-latest
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos' }}
+    runs-on: macos-13
     needs: [get-release, build-macos-arm64-lib]
     steps:
       - uses: actions/checkout@v3
@@ -156,19 +170,21 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
       - name: Install appdmg
-        run: npm install -g appdmg
+        run: |
+          python3 -m pip install setuptools --break-system-packages
+          npm install -g appdmg
       - uses: actions/download-artifact@v3
         with:
           name: macos-arm64-lib
           path: ui/flutter/lib-arm64
       - name: Build
         env:
-          VERSION: ${{ needs.get-release.outputs.tag_name }}
+          VERSION: ${{ needs.get-release.outputs.version }}
         run: |
           PROJECT_DIR=$(pwd)
-          
+
           # amd64 lib
-          go build -tags nosqlite -ldflags="-w -s" -buildmode=c-shared -o ui/flutter/lib-amd64/libgopeed.dylib github.com/GopeedLab/gopeed/bind/desktop
+          go build -tags nosqlite -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" -buildmode=c-shared -o ui/flutter/lib-amd64/libgopeed.dylib github.com/GopeedLab/gopeed/bind/desktop
           # universal binary
           mkdir -p ui/flutter/macos/Frameworks
           cp ui/flutter/lib-amd64/libgopeed.dylib ui/flutter/macos/Frameworks/amd64-lib
@@ -190,7 +206,7 @@ jobs:
           }
           EOF
           mkdir dist
-          appdmg appdmg.json dist/Gopeed-$VERSION-macos.dmg
+          appdmg appdmg.json dist/Gopeed-v$VERSION-macos.dmg
       - name: Upload
         uses: shogo82148/actions-upload-release-asset@v1
         with:
@@ -198,6 +214,7 @@ jobs:
           asset_path: ui/flutter/build/macos/Build/Products/Release/dist/*
           overwrite: true
   build-linux:
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'linux' }}
     runs-on: ubuntu-latest
     needs: [get-release]
     steps:
@@ -209,55 +226,138 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
       - run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ninja-build libgtk-3-dev libayatana-appindicator3-dev
+          sudo apt update -y
+          # flutter build dependencies
+          sudo apt install -y ninja-build libgtk-3-dev libayatana-appindicator3-1 libayatana-appindicator3-dev
+          # appimage build dependencies
+          sudo apt install -y libfuse2 locate
+          wget -O appimagetool "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+          sudo mv appimagetool /usr/local/bin/
       - name: Build
         env:
-          VERSION: ${{ needs.get-release.outputs.tag_name }}
+          VERSION: ${{ needs.get-release.outputs.version }}
         run: |
-          go build -tags nosqlite -ldflags="-w -s" -buildmode=c-shared -o ui/flutter/linux/bundle/lib/libgopeed.so github.com/GopeedLab/gopeed/bind/desktop
+          go build -tags nosqlite -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" -buildmode=c-shared -o ui/flutter/linux/bundle/lib/libgopeed.so github.com/GopeedLab/gopeed/bind/desktop
           cd ui/flutter
-          flutter build linux
-          mkdir -p debian/gui
-          cp assets/icon/icon_1024.png debian/gui/gopeed.png
-          cat>debian/debian.yaml<<EOF
-          flutter_app: 
-            command: gopeed
-            arch: x64
-            parent: /usr/local/lib
-          control:
-            Package: gopeed
-            Version: ${VERSION:1} 
-            Architecture: amd64
-            Essential: no
-            Priority: optional
-            Depends:
-            Maintainer: monkeyWie
-            Description: High speed downloader that supports all platforms.
-          EOF
-
-          cat>debian/gui/gopeed.desktop<<EOF
-          [Desktop Entry]
-          Version=${VERSION:1} 
-          Name=Gopeed
-          GenericName=Gopeed
-          Comment=High speed downloader that supports all platforms.
-          Terminal=false
-          Type=Application
-          Categories=Utility
-          Keywords=Flutter;Downloader;
-          EOF
-
-          dart pub global activate flutter_to_debian
-          flutter_to_debian
-          mv debian/packages/gopeed*.deb debian/packages/Gopeed-$VERSION-linux-amd64.deb
+          dart pub global activate -sgit https://github.com/GopeedLab/flutter_distributor.git --git-path packages/flutter_distributor
+          flutter_distributor package --platform linux --targets appimage,deb
+          cd dist/*
+          mv gopeed-*-linux.AppImage Gopeed-v${VERSION}-linux-x86_64.AppImage
+          mv gopeed-*-linux.deb Gopeed-v${VERSION}-linux-amd64.deb
       - name: Upload
         uses: shogo82148/actions-upload-release-asset@v1
         with:
           upload_url: ${{ needs.get-release.outputs.upload_url }}
-          asset_path: ui/flutter/debian/packages/*
+          asset_path: ui/flutter/dist/*/*
           overwrite: true
+  build-snap:
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'snap' }}
+    runs-on: ubuntu-latest
+    needs: [get-release]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Setup LXD
+        uses: canonical/setup-lxd@v0.1.1
+        with:
+          channel: latest/stable
+      - name: Build
+        env:
+          VERSION: ${{ needs.get-release.outputs.version }}
+        run: |
+          go build -tags nosqlite -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" -buildmode=c-shared -o ui/flutter/linux/bundle/lib/libgopeed.so github.com/GopeedLab/gopeed/bind/desktop
+          cd ui/flutter
+
+          sudo snap install snapcraft --classic
+          mkdir -p snap/gui
+          cp assets/icon/icon.svg snap/gui/gopeed.svg
+
+          cat>snap/snapcraft.yaml<<EOF
+          name: gopeed
+          version: $VERSION
+          summary: A modern download manager
+          description: High speed downloader that supports all platforms.
+
+          confinement: strict
+          base: core22
+          grade: stable
+
+          architectures:
+            - build-on: amd64
+              build-for: amd64
+
+          slots:
+            dbus-gopeed:
+              interface: dbus
+              bus: session
+              name: com.gopeed.gopeed
+
+          apps:
+            gopeed:
+              command: bin/gopeed
+              extensions: [gnome]
+              plugs:
+                - network
+                - home
+              slots:
+                - dbus-gopeed
+          parts:
+            flutter-git:
+              source: https://github.com/flutter/flutter.git
+              source-tag: $FLUTTER_VERSION
+              source-depth: 1
+              plugin: nil
+              override-build: |
+                mkdir -p \$CRAFT_PART_INSTALL/usr/bin
+                mkdir -p \$CRAFT_PART_INSTALL/usr/libexec
+                cp -r \$CRAFT_PART_SRC \$CRAFT_PART_INSTALL/usr/libexec/flutter
+                ln -s \$CRAFT_PART_INSTALL/usr/libexec/flutter/bin/flutter \$CRAFT_PART_INSTALL/usr/bin/flutter
+                ln -s \$SNAPCRAFT_PART_INSTALL/usr/libexec/flutter/bin/dart \$SNAPCRAFT_PART_INSTALL/usr/bin/dart
+                \$CRAFT_PART_INSTALL/usr/bin/flutter doctor
+              build-packages:
+                - clang
+                - cmake
+                - curl
+                - libgtk-3-dev
+                - ninja-build
+                - unzip
+                - xz-utils
+                - zip
+              override-prime: ''
+            zenity:
+              plugin: nil
+              stage-packages:
+                - zenity
+            gopeed:
+              after: [flutter-git,zenity]
+              source: .
+              plugin: nil
+              stage-packages:
+                - libgtk-3-dev
+                - libappindicator3-dev
+              override-build: |
+                # work around pub get stack overflow # https://github.com/dart-lang/sdk/issues/51068#issuecomment-1396588253
+                set +e
+                dart pub get
+                set -eux
+                flutter build linux --release -v
+                mkdir -p \$CRAFT_PART_INSTALL/bin/
+                cp -r build/linux/*/release/bundle/* \$CRAFT_PART_INSTALL/bin/
+          EOF
+
+          cp linux/assets/com.gopeed.Gopeed.desktop snap/gui/gopeed.desktop
+          sed -i 's/Icon=com.gopeed.Gopeed/Icon=\${SNAP}\/meta\/gui\/gopeed.svg/g' snap/gui/gopeed.desktop
+
+          snapcraft --use-lxd
+
+          # Snapcraft login
+          export SNAPCRAFT_STORE_CREDENTIALS=${{ secrets.SNAP_STORE_LOGIN }}
+          snapcraft upload --release=${{ github.event.inputs.test == 'true' && 'edge' || 'stable' }} gopeed_${VERSION}_amd64.snap
   build-android:
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'android' }}
     runs-on: ubuntu-latest
     needs: [get-release]
     steps:
@@ -268,26 +368,59 @@ jobs:
       - uses: actions/setup-java@v3
         with:
           distribution: "zulu"
-          java-version: "11"
+          java-version: "17"
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
       - name: Build
         env:
-          VERSION: ${{ needs.get-release.outputs.tag_name }}
-          APK_KEYSTORE : ${{ secrets.APK_KEYSTORE }}
-          APK_KEY_PASSWORD : ${{ secrets.APK_KEY_PASSWORD }}
-          APK_STORE_PASSWORD : ${{ secrets.APK_STORE_PASSWORD }}
+          VERSION: ${{ needs.get-release.outputs.version }}
+          APK_KEYSTORE: ${{ secrets.APK_KEYSTORE }}
+          APK_KEY_PASSWORD: ${{ secrets.APK_KEY_PASSWORD }}
+          APK_STORE_PASSWORD: ${{ secrets.APK_STORE_PASSWORD }}
         run: |
           go install golang.org/x/mobile/cmd/gomobile@latest
           go get golang.org/x/mobile/bind
           gomobile init
-          gomobile bind -tags nosqlite -ldflags="-w -s" -o ui/flutter/android/app/libs/libgopeed.aar -target=android -androidapi 19 -javapkg=com.gopeed github.com/GopeedLab/gopeed/bind/mobile
+          gomobile bind -tags nosqlite -ldflags="-w -s -checklinkname=0 -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" -o ui/flutter/android/app/libs/libgopeed.aar -target=android -androidapi 21 -javapkg=com.gopeed github.com/GopeedLab/gopeed/bind/mobile
           cd ui/flutter
           echo $APK_KEYSTORE | base64 -di > android/app/upload-keystore.jks
           flutter build apk
           mkdir dist
-          cp build/app/outputs/flutter-apk/app-release.apk dist/Gopeed-$VERSION-android.apk
+          cp build/app/outputs/flutter-apk/app-release.apk dist/Gopeed-v$VERSION-android.apk
+      - name: Upload
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ needs.get-release.outputs.upload_url }}
+          asset_path: ui/flutter/dist/*
+          overwrite: true
+  build-ios:
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'ios' }}
+    runs-on: macos-latest
+    needs: [get-release]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - name: Build
+        env:
+          VERSION: ${{ needs.get-release.outputs.version }}
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go get golang.org/x/mobile/bind
+          gomobile init
+          gomobile bind -tags nosqlite -ldflags="-w -s -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" -o ui/flutter/ios/Frameworks/Libgopeed.xcframework -target=ios github.com/GopeedLab/gopeed/bind/mobile
+          cd ui/flutter
+          flutter build ios --no-codesign
+          mkdir Payload
+          cp -r build/ios/iphoneos/Runner.app Payload
+          zip -r -y Payload.zip Payload/Runner.app
+          mkdir dist
+          mv Payload.zip dist/Gopeed-v$VERSION-ios.ipa
       - name: Upload
         uses: shogo82148/actions-upload-release-asset@v1
         with:
@@ -295,6 +428,7 @@ jobs:
           asset_path: ui/flutter/dist/*
           overwrite: true
   build-web:
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'web' || github.event.inputs.platform == 'qnap' }}
     runs-on: ubuntu-latest
     needs: [get-release]
     steps:
@@ -307,13 +441,15 @@ jobs:
           flutter-version: ${{ env.FLUTTER_VERSION }}
       - name: Build
         env:
-          VERSION: ${{ needs.get-release.outputs.tag_name }}
+          VERSION: ${{ needs.get-release.outputs.version }}
         run: |
+          VERSION=${VERSION:-$(date +%y%m%d%H%M)} # Use current time as version if not specified
           cd ui/flutter
-          flutter build web --web-renderer html
+          flutter build web --no-web-resources-cdn
           cd ../../
           cp -r ui/flutter/build/web cmd/web/dist
           mkdir -p dist/zip
+
           goos_arr=(windows darwin linux)
           goarch_arr=(386 amd64 arm64)
           export CGO_ENABLED=0
@@ -323,9 +459,9 @@ jobs:
               if [ $goos = "darwin" ]; then
                 goos_name="macos"
               fi
-              name=gopeed-web-$VERSION-$goos_name-$goarch
+              name=gopeed-web-v$VERSION-$goos_name-$goarch
               dir="dist/$name/"
-              (GOOS=$goos GOARCH=$goarch go build -tags nosqlite,web -ldflags="-s -w" -o $dir github.com/GopeedLab/gopeed/cmd/web \
+              (GOOS=$goos GOARCH=$goarch go build -tags nosqlite,web -ldflags="-s -w -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION" -o $dir github.com/GopeedLab/gopeed/cmd/web \
               && cd $dir \
               && file=$(ls -AU | head -1) \
               && mkdir $name \
@@ -335,16 +471,83 @@ jobs:
               || true
             done
           done
+      - uses: actions/upload-artifact@v3
+        with:
+          name: web-dist
+          path: dist/zip/
       - name: Upload
         uses: shogo82148/actions-upload-release-asset@v1
         with:
           upload_url: ${{ needs.get-release.outputs.upload_url }}
           asset_path: dist/zip/*
           overwrite: true
+  build-qnap:
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'qnap' }}
+    runs-on: ubuntu-latest
+    needs: [get-release, build-web]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.8.18'
+      - uses: actions/download-artifact@v3
+        with:
+          name: web-dist
+          path: dist/zip/
+      - name: Build
+        env:
+          VERSION: ${{ needs.get-release.outputs.version }}
+        run: |
+          sudo apt update -y
+          sudo apt install -y pv bsdmainutils
+          wget -O qdk2_0.32.bionic_amd64.deb "https://github.com/qnap-dev/qdk2/releases/download/v0.32/qdk2_0.32.bionic_amd64.deb"
+          dpkg -X qdk2_0.32.bionic_amd64.deb qdk2 # Direct installs will fail due to missing dependencies!
+          [[ -d qdk2 ]] || exit 1
+          
+          export PATH=$(pwd)/qdk2/usr/bin:$(pwd)/qdk2/usr/share/qdk2/QDK/bin:${PATH}
+          wget -O Gopeed.template.tar.gz "https://github.com/GopeedLab/QpkgBuild/raw/refs/heads/master/template/Gopeed.template.tar.gz"
+          tar -zxf Gopeed.template.tar.gz
+          [[ -d Gopeed ]] || exit 1
+          
+          goos=linux
+          goarch_arr=(amd64 arm64)
+          for goarch in "${goarch_arr[@]}"; do
+            qarch=x86_64
+            [[ "${goarch}" == "arm64" ]] && qarch=arm_64
+            name=gopeed-web-v${VERSION}-${goos}-${goarch}
+            unzip dist/zip/${name}.zip -d dist/${name}
+            cp dist/${name}/${name}/* Gopeed/${qarch}/
+          done
+          cd Gopeed
+          sed -i -e 's/__QPKG_VER__/${VERSION}/g' qpkg.cfg
+          qbuild || exit 1
+          
+          mkdir -p ../dist/qnap
+          goos=qnap
+          for goarch in "${goarch_arr[@]}"; do
+            qarch=x86_64
+            [[ "${goarch}" == "arm64" ]] && qarch=arm_64
+            sname=Gopeed_${VERSION}_${qarch}.qpkg
+            dname=gopeed-v${VERSION}-${goos}-${goarch}.qpkg
+            [[ -f build/${sname} ]] && cp -ra build/${sname} ../dist/qnap/${dname}
+          done
+      - name: Upload
+        uses: shogo82148/actions-upload-release-asset@v1
+        with:
+          upload_url: ${{ needs.get-release.outputs.upload_url }}
+          asset_path: dist/qnap/*
+          overwrite: true
   build-docker:
+    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'docker' }}
     runs-on: ubuntu-latest
     needs: [get-release]
     steps:
+      - name: Remove unnecessary files
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
       - uses: actions/checkout@v3
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v2
@@ -355,16 +558,28 @@ jobs:
         with:
           username: liwei2633
           password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Build flutter web
+        run: |
+          cd ui/flutter
+          flutter build web --no-web-resources-cdn
+          cd ../../
+          rm -rf cmd/web/dist
+          cp -r ui/flutter/build/web cmd/web/dist
       - name: Build and push
         uses: docker/build-push-action@v2
         env:
-          VERSION: ${{ needs.get-release.outputs.tag_name }}
+          VERSION: ${{ needs.get-release.outputs.version }}
         with:
-          push: true
+          context: .
+          push: ${{ github.event.inputs.test == 'true' && 'false' || 'true' }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            IN_DOCKER=true
           platforms: |
             linux/386
             linux/amd64
             linux/arm64
+            linux/arm/v7
           tags: |
             liwei2633/gopeed:latest
-            liwei2633/gopeed:${{ env.VERSION }}
+            liwei2633/gopeed:v${{ env.VERSION }}

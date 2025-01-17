@@ -1,6 +1,10 @@
 package model
 
-import "io/fs"
+import (
+	"encoding/base64"
+	"github.com/GopeedLab/gopeed/pkg/base"
+	"io/fs"
+)
 
 type Storage string
 
@@ -10,15 +14,20 @@ const (
 )
 
 type StartConfig struct {
-	Network         string  `json:"network"`
-	Address         string  `json:"address"`
-	RefreshInterval int     `json:"refreshInterval"`
-	Storage         Storage `json:"storage"`
-	StorageDir      string  `json:"storageDir"`
-	ApiToken        string  `json:"apiToken"`
+	Network           string                      `json:"network"`
+	Address           string                      `json:"address"`
+	RefreshInterval   int                         `json:"refreshInterval"`
+	Storage           Storage                     `json:"storage"`
+	StorageDir        string                      `json:"storageDir"`
+	WhiteDownloadDirs []string                    `json:"whiteDownloadDirs"`
+	ApiToken          string                      `json:"apiToken"`
+	DownloadConfig    *base.DownloaderStoreConfig `json:"downloadConfig"`
 
-	WebEnable bool
-	WebFS     fs.FS
+	ProductionMode bool
+
+	WebEnable    bool
+	WebFS        fs.FS
+	WebBasicAuth *WebBasicAuth
 }
 
 func (cfg *StartConfig) Init() *StartConfig {
@@ -38,4 +47,15 @@ func (cfg *StartConfig) Init() *StartConfig {
 		cfg.StorageDir = "./"
 	}
 	return cfg
+}
+
+type WebBasicAuth struct {
+	Username string
+	Password string
+}
+
+// Authorization returns the value of the Authorization header to be used in HTTP requests.
+func (cfg *WebBasicAuth) Authorization() string {
+	userId := cfg.Username + ":" + cfg.Password
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(userId))
 }

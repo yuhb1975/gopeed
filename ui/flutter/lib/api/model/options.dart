@@ -10,9 +10,9 @@ class Options {
   Object? extra;
 
   Options({
-    required this.name,
-    required this.path,
-    required this.selectFiles,
+    this.name = '',
+    this.path = '',
+    this.selectFiles = const [],
     this.extra,
   });
 
@@ -24,11 +24,16 @@ class Options {
 
 @JsonSerializable()
 class OptsExtraHttp {
-  int connections = 0;
+  int connections;
+  bool autoTorrent;
 
-  OptsExtraHttp();
+  OptsExtraHttp({
+    this.connections = 0,
+    this.autoTorrent = false,
+  });
 
   factory OptsExtraHttp.fromJson(Map<String, dynamic> json) =>
       _$OptsExtraHttpFromJson(json);
+
   Map<String, dynamic> toJson() => _$OptsExtraHttpToJson(this);
 }

@@ -1,21 +1,27 @@
 import 'dart:async';
-import 'dart:convert';
+import 'dart:io';
 
 import 'package:badges/badges.dart' as badges;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
+import 'package:gopeed/app/views/copy_button.dart';
 import 'package:intl/intl.dart';
+import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../../../generated/locales.g.dart';
+import '../../../../api/model/downloader_config.dart';
+import '../../../../i18n/message.dart';
 import '../../../../util/input_formatter.dart';
 import '../../../../util/locale_manager.dart';
+import '../../../../util/log_util.dart';
 import '../../../../util/message.dart';
 import '../../../../util/package_info.dart';
+import '../../../../util/scheme_register/scheme_register.dart';
 import '../../../../util/util.dart';
 import '../../../views/check_list_view.dart';
 import '../../../views/directory_selector.dart';
+import '../../../views/open_in_new.dart';
 import '../../../views/outlined_button_loading.dart';
 import '../../app/controllers/app_controller.dart';
 import '../controllers/setting_controller.dart';
@@ -33,13 +39,22 @@ class SettingView extends GetView<SettingController> {
     final startCfg = appController.startConfig;
 
     Timer? timer;
-    debounceSave({bool needRestart = false}) {
-      var completer = Completer<void>();
+    Future<bool> debounceSave(
+        {Future<String> Function()? check, bool needRestart = false}) {
+      var completer = Completer<bool>();
       timer?.cancel();
-      timer = Timer(const Duration(milliseconds: 1000), () {
+      timer = Timer(const Duration(milliseconds: 1000), () async {
+        if (check != null) {
+          final checkResult = await check();
+          if (checkResult.isNotEmpty) {
+            showErrorMessage(checkResult);
+            completer.complete(false);
+            return;
+          }
+        }
         appController
             .saveConfig()
-            .then(completer.complete)
+            .then((_) => completer.complete(true))
             .onError(completer.completeError);
         if (needRestart) {
           showMessage('tip'.tr, 'effectAfterRestart'.tr);
@@ -66,6 +81,7 @@ class SettingView extends GetView<SettingController> {
       return DirectorySelector(
         controller: downloadDirController,
         showLabel: false,
+        showAndoirdToggle: true,
       );
     });
     final buildMaxRunning = _buildConfigItem(
@@ -95,8 +111,101 @@ class SettingView extends GetView<SettingController> {
       );
     });
 
+    final buildDefaultDirectDownload =
+        _buildConfigItem('defaultDirectDownload', () {
+      return appController.downloaderConfig.value.extra.defaultDirectDownload
+          ? 'on'.tr
+          : 'off'.tr;
+    }, (Key key) {
+      return Container(
+        alignment: Alignment.centerLeft,
+        child: Switch(
+          value:
+              appController.downloaderConfig.value.extra.defaultDirectDownload,
+          onChanged: (bool value) async {
+            appController.downloaderConfig.update((val) {
+              val!.extra.defaultDirectDownload = value;
+            });
+            await debounceSave();
+          },
+        ),
+      );
+    });
+
+    buildBrowserExtension() {
+      return ListTile(
+          title: Text('browserExtension'.tr),
+          subtitle: const Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              OpenInNew(
+                text: "Chrome",
+                url:
+                    "https://chromewebstore.google.com/detail/gopeed/mijpgljlfcapndmchhjffkpckknofcnd",
+              ),
+              SizedBox(width: 10),
+              OpenInNew(
+                text: "Edge",
+                url:
+                    "https://microsoftedge.microsoft.com/addons/detail/dkajnckekendchdleoaenoophcobooce",
+              ),
+              SizedBox(width: 10),
+              OpenInNew(
+                text: "Firefox",
+                url:
+                    "https://addons.mozilla.org/zh-CN/firefox/addon/gopeed-extension",
+              ),
+            ],
+          ).paddingOnly(top: 5));
+    }
+
+    // Currently auto startup only support Windows and Linux
+    final buildAutoStartup = !Util.isWindows() && !Util.isLinux()
+        ? () => null
+        : _buildConfigItem('launchAtStartup', () {
+            return appController.autoStartup.value ? 'on'.tr : 'off'.tr;
+          }, (Key key) {
+            return Container(
+              alignment: Alignment.centerLeft,
+              child: Switch(
+                value: appController.autoStartup.value,
+                onChanged: (bool value) async {
+                  try {
+                    if (value) {
+                      await launchAtStartup.enable();
+                    } else {
+                      await launchAtStartup.disable();
+                    }
+                    appController.autoStartup.value = value;
+                  } catch (e) {
+                    showErrorMessage(e);
+                    logger.e('launchAtStartup fail', e);
+                  }
+                },
+              ),
+            );
+          });
+
     // http config items start
     final httpConfig = downloaderCfg.value.protocolConfig.http;
+    final buildHttpUa =
+        _buildConfigItem('User-Agent', () => httpConfig.userAgent, (Key key) {
+      final uaController = TextEditingController(text: httpConfig.userAgent);
+      uaController.addListener(() async {
+        if (uaController.text.isNotEmpty &&
+            uaController.text != httpConfig.userAgent) {
+          httpConfig.userAgent = uaController.text;
+
+          await debounceSave();
+        }
+      });
+
+      return TextField(
+        key: key,
+        focusNode: FocusNode(),
+        controller: uaController,
+      );
+    });
     final buildHttpConnections = _buildConfigItem(
         'connections', () => httpConfig.connections.toString(), (Key key) {
       final connectionsController =
@@ -121,10 +230,50 @@ class SettingView extends GetView<SettingController> {
         ],
       );
     });
+    final buildHttpUseServerCtime = _buildConfigItem(
+        'useServerCtime', () => httpConfig.useServerCtime ? 'on'.tr : 'off'.tr,
+        (Key key) {
+      return Container(
+        alignment: Alignment.centerLeft,
+        child: Switch(
+          value: httpConfig.useServerCtime,
+          onChanged: (bool value) {
+            downloaderCfg.update((val) {
+              val!.protocolConfig.http.useServerCtime = value;
+            });
+            debounceSave();
+          },
+        ),
+      );
+    });
 
     // bt config items start
+    final btConfig = downloaderCfg.value.protocolConfig.bt;
     final btExtConfig = downloaderCfg.value.extra.bt;
+    final buildBtListenPort = _buildConfigItem(
+        'port', () => btConfig.listenPort.toString(), (Key key) {
+      final listenPortController =
+          TextEditingController(text: btConfig.listenPort.toString());
+      listenPortController.addListener(() async {
+        if (listenPortController.text.isNotEmpty &&
+            listenPortController.text != btConfig.listenPort.toString()) {
+          btConfig.listenPort = int.parse(listenPortController.text);
 
+          await debounceSave();
+        }
+      });
+
+      return TextField(
+        key: key,
+        focusNode: FocusNode(),
+        controller: listenPortController,
+        keyboardType: TextInputType.number,
+        inputFormatters: [
+          FilteringTextInputFormatter.digitsOnly,
+          NumericalRangeFormatter(min: 0, max: 65535),
+        ],
+      );
+    });
     final buildBtTrackerSubscribeUrls = _buildConfigItem(
         'subscribeTracker',
         () => 'items'.trParams(
@@ -166,8 +315,13 @@ class SettingView extends GetView<SettingController> {
               Expanded(
                 child: SwitchListTile(
                     controlAffinity: ListTileControlAffinity.leading,
-                    value: true,
-                    onChanged: (bool value) {},
+                    value: btExtConfig.autoUpdateTrackers,
+                    onChanged: (bool value) {
+                      downloaderCfg.update((val) {
+                        val!.extra.bt.autoUpdateTrackers = value;
+                      });
+                      debounceSave();
+                    },
                     title: Text('updateDaily'.tr)),
               ),
             ],
@@ -205,6 +359,100 @@ class SettingView extends GetView<SettingController> {
         },
       );
     });
+    final buildBtSeedConfig = _buildConfigItem('seedConfig',
+        () => '${'seedKeep'.tr}(${btConfig.seedKeep ? 'on'.tr : 'off'.tr})',
+        (Key key) {
+      final seedRatioController =
+          TextEditingController(text: btConfig.seedRatio.toString());
+      seedRatioController.addListener(() {
+        if (seedRatioController.text.isNotEmpty) {
+          btConfig.seedRatio = double.parse(seedRatioController.text);
+          debounceSave();
+        }
+      });
+      final seedTimeController =
+          TextEditingController(text: (btConfig.seedTime ~/ 60).toString());
+      seedTimeController.addListener(() {
+        if (seedTimeController.text.isNotEmpty) {
+          btConfig.seedTime = int.parse(seedTimeController.text) * 60;
+          debounceSave();
+        }
+      });
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SwitchListTile(
+              controlAffinity: ListTileControlAffinity.leading,
+              contentPadding: EdgeInsets.zero,
+              value: btConfig.seedKeep,
+              onChanged: (bool value) {
+                downloaderCfg.update((val) {
+                  val!.protocolConfig.bt.seedKeep = value;
+                });
+                debounceSave();
+              },
+              title: Text('seedKeep'.tr)),
+          btConfig.seedKeep
+              ? null
+              : TextField(
+                  controller: seedRatioController,
+                  decoration: InputDecoration(
+                    labelText: 'seedRatio'.tr,
+                  ),
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(
+                        RegExp(r'^\d+\.?\d{0,2}')),
+                  ],
+                ),
+          btConfig.seedKeep
+              ? null
+              : TextField(
+                  controller: seedTimeController,
+                  decoration: InputDecoration(
+                    labelText: 'seedTime'.tr,
+                  ),
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    NumericalRangeFormatter(min: 0, max: 100000000),
+                  ],
+                ),
+        ].where((e) => e != null).map((e) => e!).toList(),
+      );
+    });
+    final buildBtDefaultClientConfig = !Util.isWindows()
+        ? () => null
+        : _buildConfigItem('setAsDefaultBtClient', () {
+            return appController.downloaderConfig.value.extra.defaultBtClient
+                ? 'on'.tr
+                : 'off'.tr;
+          }, (Key key) {
+            return Container(
+              alignment: Alignment.centerLeft,
+              child: Switch(
+                value:
+                    appController.downloaderConfig.value.extra.defaultBtClient,
+                onChanged: (bool value) async {
+                  try {
+                    if (value) {
+                      registerDefaultTorrentClient();
+                    } else {
+                      unregisterDefaultTorrentClient();
+                    }
+                    appController.downloaderConfig.update((val) {
+                      val!.extra.defaultBtClient = value;
+                    });
+                    await debounceSave();
+                  } catch (e) {
+                    showErrorMessage(e);
+                    logger.e('register default torrent client fail', e);
+                  }
+                },
+              ),
+            );
+          });
 
     // ui config items start
     final buildTheme = _buildConfigItem(
@@ -231,8 +479,7 @@ class SettingView extends GetView<SettingController> {
             ));
     final buildLocale = _buildConfigItem(
         'locale',
-        () => AppTranslation
-            .translations[downloaderCfg.value.extra.locale]!['label']!,
+        () => messages.keys[downloaderCfg.value.extra.locale]!['label']!,
         (Key key) => DropdownButton<String>(
               key: key,
               value: downloaderCfg.value.extra.locale,
@@ -246,23 +493,26 @@ class SettingView extends GetView<SettingController> {
 
                 await debounceSave();
               },
-              items: AppTranslation.translations.keys
+              items: messages.keys.keys
                   .map((e) => DropdownMenuItem<String>(
                         value: e,
-                        child: Text(AppTranslation.translations[e]!['label']!),
+                        child: Text(messages.keys[e]!['label']!),
                       ))
                   .toList(),
             ));
 
     // about config items start
-    buildHomepage() => ListTile(
-          title: Text('homepage'.tr),
-          subtitle: const Text('https://github.com/GopeedLab/gopeed'),
-          onTap: () {
-            launchUrl(Uri.parse('https://github.com/GopeedLab/gopeed'),
-                mode: LaunchMode.externalApplication);
-          },
-        );
+    buildHomepage() {
+      const homePage = 'https://gopeed.com';
+      return ListTile(
+        title: Text('homepage'.tr),
+        subtitle: const Text(homePage),
+        onTap: () {
+          launchUrl(Uri.parse(homePage), mode: LaunchMode.externalApplication);
+        },
+      );
+    }
+
     buildVersion() {
       bool isNewVersion(String current, String latest) {
         if (latest == "") {
@@ -322,7 +572,185 @@ class SettingView extends GetView<SettingController> {
       );
     }
 
-    // advanced config items start
+    buildThanks() {
+      const thankPage =
+          'https://github.com/GopeedLab/gopeed/graphs/contributors';
+      return ListTile(
+        title: Text('thanks'.tr),
+        subtitle: Text('thanksDesc'.tr),
+        onTap: () {
+          launchUrl(Uri.parse(thankPage), mode: LaunchMode.externalApplication);
+        },
+      );
+    }
+
+    // advanced config proxy items start
+    final proxy = downloaderCfg.value.proxy;
+    final buildProxy = _buildConfigItem(
+      'proxy',
+      () {
+        switch (proxy.proxyMode) {
+          case ProxyModeEnum.noProxy:
+            return 'noProxy'.tr;
+          case ProxyModeEnum.systemProxy:
+            return 'systemProxy'.tr;
+          case ProxyModeEnum.customProxy:
+            return '${downloaderCfg.value.proxy.scheme}://${downloaderCfg.value.proxy.host}';
+        }
+      },
+      (Key key) {
+        final mode = SizedBox(
+          width: 150,
+          child: DropdownButtonFormField<ProxyModeEnum>(
+            value: proxy.proxyMode,
+            onChanged: (value) async {
+              if (value != null && value != proxy.proxyMode) {
+                proxy.proxyMode = value;
+                downloaderCfg.update((val) {
+                  val!.proxy = proxy;
+                });
+
+                await debounceSave();
+              }
+            },
+            items: [
+              DropdownMenuItem<ProxyModeEnum>(
+                value: ProxyModeEnum.noProxy,
+                child: Text('noProxy'.tr),
+              ),
+              DropdownMenuItem<ProxyModeEnum>(
+                value: ProxyModeEnum.systemProxy,
+                child: Text('systemProxy'.tr),
+              ),
+              DropdownMenuItem<ProxyModeEnum>(
+                value: ProxyModeEnum.customProxy,
+                child: Text('customProxy'.tr),
+              ),
+            ],
+          ),
+        );
+
+        final scheme = SizedBox(
+          width: 150,
+          child: DropdownButtonFormField<String>(
+            value: proxy.scheme,
+            onChanged: (value) async {
+              if (value != null && value != proxy.scheme) {
+                proxy.scheme = value;
+
+                await debounceSave();
+              }
+            },
+            items: const [
+              DropdownMenuItem<String>(
+                value: 'http',
+                child: Text('HTTP'),
+              ),
+              DropdownMenuItem<String>(
+                value: 'https',
+                child: Text('HTTPS'),
+              ),
+              DropdownMenuItem<String>(
+                value: 'socks5',
+                child: Text('SOCKS5'),
+              ),
+            ],
+          ),
+        );
+
+        final arr = proxy.host.split(':');
+        var host = '';
+        var port = '';
+        if (arr.length > 1) {
+          host = arr[0];
+          port = arr[1];
+        }
+
+        final ipController = TextEditingController(text: host);
+        final portController = TextEditingController(text: port);
+        updateAddress() async {
+          final newAddress = '${ipController.text}:${portController.text}';
+          if (newAddress != startCfg.value.address) {
+            proxy.host = newAddress;
+
+            await debounceSave();
+          }
+        }
+
+        ipController.addListener(updateAddress);
+        portController.addListener(updateAddress);
+        final server = Row(children: [
+          Flexible(
+            child: TextFormField(
+              controller: ipController,
+              decoration: InputDecoration(
+                labelText: 'server'.tr,
+                contentPadding: const EdgeInsets.all(0.0),
+              ),
+            ),
+          ),
+          const Padding(padding: EdgeInsets.only(left: 10)),
+          Flexible(
+            child: TextFormField(
+              controller: portController,
+              decoration: InputDecoration(
+                labelText: 'port'.tr,
+                contentPadding: const EdgeInsets.all(0.0),
+              ),
+              keyboardType: TextInputType.number,
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                NumericalRangeFormatter(min: 0, max: 65535),
+              ],
+            ),
+          ),
+        ]);
+
+        final usrController = TextEditingController(text: proxy.usr);
+        final pwdController = TextEditingController(text: proxy.pwd);
+
+        final auth = Row(children: [
+          Flexible(
+            child: TextFormField(
+              controller: usrController,
+              decoration: InputDecoration(
+                labelText: 'username'.tr,
+                contentPadding: const EdgeInsets.all(0.0),
+              ),
+            ),
+          ),
+          const Padding(padding: EdgeInsets.only(left: 10)),
+          Flexible(
+            child: TextFormField(
+              controller: pwdController,
+              decoration: InputDecoration(
+                labelText: 'password'.tr,
+                contentPadding: const EdgeInsets.all(0.0),
+              ),
+            ),
+          ),
+        ]);
+
+        List<Widget> customView() {
+          if (proxy.proxyMode != ProxyModeEnum.customProxy) {
+            return [];
+          }
+          return [scheme, server, auth];
+        }
+
+        return Form(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: _addPadding([
+              mode,
+              ...customView(),
+            ]),
+          ),
+        );
+      },
+    );
+
+    // advanced config API items start
     final buildApiProtocol = _buildConfigItem(
       'protocol',
       () => startCfg.value.network == 'tcp'
@@ -331,24 +759,24 @@ class SettingView extends GetView<SettingController> {
       (Key key) {
         final items = <Widget>[
           SizedBox(
-            width: 150,
+            width: 80,
             child: DropdownButtonFormField<String>(
               value: startCfg.value.network,
-              onChanged: (value) async {
-                startCfg.update((val) {
-                  val!.network = value!;
-                });
+              onChanged: Util.isDesktop()
+                  ? (value) async {
+                      startCfg.update((val) {
+                        val!.network = value!;
+                      });
 
-                await debounceSave(needRestart: true);
-              },
+                      await debounceSave(needRestart: true);
+                    }
+                  : null,
               items: [
-                !Util.isMobile()
-                    ? const DropdownMenuItem<String>(
-                        value: 'tcp',
-                        child: Text('TCP'),
-                      )
-                    : null,
-                Util.isUnix()
+                const DropdownMenuItem<String>(
+                  value: 'tcp',
+                  child: Text('TCP'),
+                ),
+                Util.supportUnixSocket()
                     ? const DropdownMenuItem<String>(
                         value: 'unix',
                         child: Text('Unix'),
@@ -370,11 +798,41 @@ class SettingView extends GetView<SettingController> {
           final ipController = TextEditingController(text: ip);
           final portController = TextEditingController(text: port);
           updateAddress() async {
+            if (ipController.text.isEmpty || portController.text.isEmpty) {
+              return;
+            }
             final newAddress = '${ipController.text}:${portController.text}';
             if (newAddress != startCfg.value.address) {
               startCfg.value.address = newAddress;
 
-              await debounceSave(needRestart: true);
+              final saved = await debounceSave(
+                  check: () async {
+                    // Check if address already in use
+                    final configIp = ipController.text;
+                    final configPort = int.parse(portController.text);
+                    if (configPort == 0) {
+                      return '';
+                    }
+                    try {
+                      final socket = await Socket.connect(configIp, configPort,
+                          timeout: const Duration(seconds: 3));
+                      socket.close();
+                      return 'portInUse'
+                          .trParams({'port': configPort.toString()});
+                    } catch (e) {
+                      return '';
+                    }
+                  },
+                  needRestart: true);
+
+              // If save failed, restore the old address
+              if (!saved) {
+                final oldAddress =
+                    (await appController.loadStartConfig()).address;
+                startCfg.update((val) async {
+                  val!.address = oldAddress;
+                });
+              }
             }
           }
 
@@ -382,8 +840,7 @@ class SettingView extends GetView<SettingController> {
           portController.addListener(updateAddress);
           items.addAll([
             const Padding(padding: EdgeInsets.only(left: 20)),
-            SizedBox(
-              width: 200,
+            Flexible(
               child: TextFormField(
                 controller: ipController,
                 decoration: const InputDecoration(
@@ -397,8 +854,7 @@ class SettingView extends GetView<SettingController> {
               ),
             ),
             const Padding(padding: EdgeInsets.only(left: 10)),
-            SizedBox(
-              width: 200,
+            Flexible(
               child: TextFormField(
                 controller: portController,
                 decoration: InputDecoration(
@@ -442,6 +898,32 @@ class SettingView extends GetView<SettingController> {
       );
     });
 
+    // advanced config log items start
+    buildLogsDir() {
+      return ListTile(
+          title: Text("logDirectory".tr),
+          subtitle: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: TextEditingController(text: logsDir()),
+                  enabled: false,
+                  readOnly: true,
+                ),
+              ),
+              Util.isDesktop()
+                  ? IconButton(
+                      icon: const Icon(Icons.folder_open),
+                      onPressed: () {
+                        launchUrl(Uri.file(logsDir()));
+                      },
+                    )
+                  : CopyButton(logsDir()),
+            ],
+          ));
+    }
+
     return Obx(() {
       return GestureDetector(
         onTap: () {
@@ -473,22 +955,32 @@ class SettingView extends GetView<SettingController> {
                         Text('general'.tr),
                         Card(
                             child: Column(
-                          children: _addDivider(
-                              [buildDownloadDir(), buildMaxRunning()]),
+                          children: _addDivider([
+                            buildDownloadDir(),
+                            buildMaxRunning(),
+                            buildDefaultDirectDownload(),
+                            buildBrowserExtension(),
+                            buildAutoStartup(),
+                          ]),
                         )),
                         const Text('HTTP'),
                         Card(
                             child: Column(
                           children: _addDivider([
+                            buildHttpUa(),
                             buildHttpConnections(),
+                            buildHttpUseServerCtime(),
                           ]),
                         )),
                         const Text('BitTorrent'),
                         Card(
                             child: Column(
                           children: _addDivider([
+                            buildBtListenPort(),
                             buildBtTrackerSubscribeUrls(),
                             buildBtTrackers(),
+                            buildBtSeedConfig(),
+                            buildBtDefaultClientConfig(),
                           ]),
                         )),
                         Text('ui'.tr),
@@ -505,26 +997,55 @@ class SettingView extends GetView<SettingController> {
                           children: _addDivider([
                             buildHomepage(),
                             buildVersion(),
+                            buildThanks(),
                           ]),
                         )),
                       ]),
                     ),
                   ),
-                  Column(
-                    children: [
+                  // Column(
+                  //   children: [
+                  //     Card(
+                  //         child: Column(
+                  //       children: [
+                  //         ..._addDivider([
+                  //           buildApiProtocol(),
+                  //           Util.isDesktop() && startCfg.value.network == 'tcp'
+                  //               ? buildApiToken()
+                  //               : null,
+                  //         ]),
+                  //       ],
+                  //     )),
+                  //   ],
+                  // ),
+                  SingleChildScrollView(
+                      child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: _addPadding([
+                      Text('network'.tr),
                       Card(
                           child: Column(
-                        children: [
-                          ..._addDivider([
-                            buildApiProtocol(),
-                            Util.isDesktop() && startCfg.value.network == 'tcp'
-                                ? buildApiToken()
-                                : null,
-                          ]),
-                        ],
+                        children: _addDivider([buildProxy()]),
                       )),
-                    ],
-                  ),
+                      const Text('API'),
+                      Card(
+                          child: Column(
+                        children: _addDivider([
+                          buildApiProtocol(),
+                          Util.isDesktop() && startCfg.value.network == 'tcp'
+                              ? buildApiToken()
+                              : null,
+                        ]),
+                      )),
+                      Text('developer'.tr),
+                      Card(
+                          child: Column(
+                        children: _addDivider([
+                          buildLogsDir(),
+                        ]),
+                      )),
+                    ]),
+                  ))
                 ],
               ).paddingOnly(left: 16, right: 16, top: 16, bottom: 16)),
         ),
@@ -602,6 +1123,40 @@ class SettingView extends GetView<SettingController> {
         return 'themeDark'.tr;
       default:
         return 'themeSystem'.tr;
+    }
+  }
+}
+
+enum ProxyModeEnum {
+  noProxy,
+  systemProxy,
+  customProxy,
+}
+
+extension ProxyMode on ProxyConfig {
+  ProxyModeEnum get proxyMode {
+    if (!enable) {
+      return ProxyModeEnum.noProxy;
+    }
+    if (system) {
+      return ProxyModeEnum.systemProxy;
+    }
+    return ProxyModeEnum.customProxy;
+  }
+
+  set proxyMode(ProxyModeEnum value) {
+    switch (value) {
+      case ProxyModeEnum.noProxy:
+        enable = false;
+        break;
+      case ProxyModeEnum.systemProxy:
+        enable = true;
+        system = true;
+        break;
+      case ProxyModeEnum.customProxy:
+        enable = true;
+        system = false;
+        break;
     }
   }
 }

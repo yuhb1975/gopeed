@@ -15,10 +15,15 @@ const (
 	HttpCodeOK             = 200
 	HttpCodePartialContent = 206
 
+	HttpHeaderHost               = "Host"
 	HttpHeaderRange              = "Range"
+	HttpHeaderAcceptRanges       = "Accept-Ranges"
 	HttpHeaderContentLength      = "Content-Length"
 	HttpHeaderContentRange       = "Content-Range"
 	HttpHeaderContentDisposition = "Content-Disposition"
+	HttpHeaderUserAgent          = "User-Agent"
+	HttpHeaderLastModified       = "Last-Modified"
 
+	HttpHeaderBytes       = "bytes"
 	HttpHeaderRangeFormat = "bytes=%d-%d"
 )

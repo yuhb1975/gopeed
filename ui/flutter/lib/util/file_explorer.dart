@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:url_launcher/url_launcher_string.dart';
+
 class FileExplorer {
   static Future<void> openAndSelectFile(String filePath) async {
     if (await FileSystemEntity.isFile(filePath)) {
@@ -10,17 +12,7 @@ class FileExplorer {
   }
 
   static Future<void> _openDirectory(String directoryPath) async {
-    if (Platform.isWindows) {
-      Process.run('explorer.exe', [directoryPath]);
-    } else if (Platform.isMacOS) {
-      Process.run('open', [directoryPath]);
-    } else if (Platform.isLinux) {
-      if (await _isUbuntuOrDebian()) {
-        Process.run('xdg-open', [directoryPath]);
-      } else if (await _isCentOS()) {
-        Process.run('nautilus', [directoryPath]);
-      }
-    }
+    await launchUrlString("file://$directoryPath");
   }
 
   static Future<void> _openFile(String filePath) async {
@@ -29,29 +21,33 @@ class FileExplorer {
     } else if (Platform.isMacOS) {
       Process.run('open', ['-R', filePath]);
     } else if (Platform.isLinux) {
-      if (await _isUbuntuOrDebian()) {
-        Process.run('xdg-open', [filePath]);
-      } else if (await _isCentOS()) {
-        Process.run('nautilus', ['--select', filePath]);
+      _linuxOpen(filePath);
+    }
+  }
+
+  static Future<void> _linuxOpen(String filePath) async {
+    if (await Process.run('which', ['xdg-open'])
+        .then((value) => value.exitCode == 0)) {
+      final result = await Process.run('xdg-open', [filePath]);
+      if (result.exitCode != 0) {
+        _openWithFileManager(filePath);
       }
+    } else {
+      _openWithFileManager(filePath);
     }
   }
 
-  static Future<bool> _isUbuntuOrDebian() async {
-    final result = await Process.run('lsb_release', ['-i']);
-    if (result.exitCode != 0) {
-      return false;
+  static Future<void> _openWithFileManager(String filePath) async {
+    final desktop = Platform.environment['XDG_CURRENT_DESKTOP'];
+    if (desktop == null) {
+      throw Exception('XDG_CURRENT_DESKTOP is not set');
     }
-    final output = result.stdout.toString().toLowerCase();
-    return output.contains('ubuntu') || output.contains('debian');
-  }
-
-  static Future<bool> _isCentOS() async {
-    final result = await Process.run('cat', ['/etc/os-release']);
-    if (result.exitCode != 0) {
-      return false;
+    if (desktop == 'GNOME') {
+      await Process.run('nautilus', ['--select', filePath]);
+    } else if (desktop == 'KDE') {
+      await Process.run('dolphin', ['--select', filePath]);
+    } else {
+      throw Exception('Unsupported desktop environment');
     }
-    final output = result.stdout.toString().toLowerCase();
-    return output.contains('centos');
   }
 }

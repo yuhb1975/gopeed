@@ -3,13 +3,36 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as path;
 
 class Util {
+  static String? _storageDir;
+
+  static String cleanPath(String path) {
+    path = path.replaceAll(RegExp(r'\\'), "/");
+    if (path.startsWith(".")) {
+      path = path.substring(1);
+    }
+    if (path.startsWith("/")) {
+      path = path.substring(1);
+    }
+    return path;
+  }
+
   static String safeDir(String path) {
     if (path == "." || path == "./" || path == ".\\") {
       return "";
     }
     return path;
+  }
+
+  static String safePathJoin(List<String> paths) {
+    return paths
+        .where((e) => e.isNotEmpty)
+        .map((e) => safeDir(e))
+        .join("/")
+        .replaceAll(RegExp(r'//'), "/");
   }
 
   static String fmtByte(int byte) {
@@ -24,6 +47,32 @@ class Util {
     } else {
       return "${(byte / 1024 / 1024 / 1024).toStringAsFixed(2)} GB";
     }
+  }
+
+  static Future<void> initStorageDir() async {
+    var storageDir = "";
+    if (Util.isWindows()) {
+      storageDir = File(Platform.resolvedExecutable).parent.path;
+    } else if (!Util.isWeb()) {
+      if (Util.isLinux()) {
+        storageDir = File(Platform.resolvedExecutable).parent.path;
+        // check has write permission, if not, fallback to application support dir
+        try {
+          final testFile = File(path.join(storageDir, ".test"));
+          await testFile.writeAsString("test");
+          await testFile.delete();
+        } catch (e) {
+          storageDir = (await getApplicationSupportDirectory()).path;
+        }
+      } else {
+        storageDir = (await getApplicationSupportDirectory()).path;
+      }
+    }
+    _storageDir = storageDir;
+  }
+
+  static String getStorageDir() {
+    return _storageDir!;
   }
 
   static isAndroid() {
@@ -53,15 +102,19 @@ class Util {
     return !kIsWeb && Platform.isMacOS;
   }
 
-  static isUnix() {
-    if (kIsWeb) {
-      return false;
-    }
-    return !Platform.isWindows;
+  static isLinux() {
+    return !kIsWeb && Platform.isLinux;
   }
 
   static isWeb() {
     return kIsWeb;
+  }
+
+  static supportUnixSocket() {
+    if (kIsWeb) {
+      return false;
+    }
+    return Platform.isLinux || Platform.isMacOS || Platform.isAndroid;
   }
 
   static List<String> textToLines(String text) {
@@ -69,7 +122,7 @@ class Util {
       return [];
     }
     const ls = LineSplitter();
-    return ls.convert(text);
+    return ls.convert(text).where((line) => line.isNotEmpty).toList();
   }
 
   // if one future complete, return the result, only all future error, return the last error
@@ -91,5 +144,13 @@ class Util {
       });
     }
     return completer.future;
+  }
+
+  static void Function() debounce(Function() fn, int ms) {
+    Timer? timer;
+    return () {
+      timer?.cancel();
+      timer = Timer(Duration(milliseconds: ms), fn);
+    };
   }
 }

@@ -1,21 +1,23 @@
-FROM instrumentisto/flutter:3.10.6 AS flutter
-WORKDIR /app
-COPY ./ui/flutter/pubspec.yaml ./ui/flutter/pubspec.lock ./
-RUN flutter pub get
-COPY ./ui/flutter ./
-RUN flutter build web --web-renderer html
-
-FROM golang:1.19.3 AS go
+FROM golang:1.23.3 AS go
 WORKDIR /app
 COPY ./go.mod ./go.sum ./
 RUN go mod download
 COPY . .
-COPY --from=flutter /app/build/web ./cmd/web/dist
-RUN CGO_ENABLED=0 go build -tags nosqlite,web -ldflags="-s -w" -o dist/gopeed github.com/GopeedLab/gopeed/cmd/web
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -tags nosqlite,web \
+      -ldflags="-s -w -X github.com/GopeedLab/gopeed/pkg/base.Version=$VERSION -X github.com/GopeedLab/gopeed/pkg/base.InDocker=true" \
+      -o dist/gopeed github.com/GopeedLab/gopeed/cmd/web
 
-FROM alpine:3.14.2
+FROM alpine:3.18
 LABEL maintainer="monkeyWie"
 WORKDIR /app
 COPY --from=go /app/dist/gopeed ./
+COPY entrypoint.sh ./entrypoint.sh
+RUN apk update && \
+    apk add --no-cache su-exec ; \
+    chmod +x ./entrypoint.sh && \
+    rm -rf /var/cache/apk/*
+VOLUME ["/app/storage"]
+ENV PUID=0 PGID=0 UMASK=022
 EXPOSE 9999
-ENTRYPOINT ["./gopeed"]
+ENTRYPOINT ["./entrypoint.sh"]
